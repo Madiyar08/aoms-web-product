@@ -409,54 +409,6 @@ type MyCleaningReport = {
   reviewedAt: string | null; reviewComment: string; antifraud: boolean;
 };
 
-function MyCleaningReportsScreen({ initData, onBack }: { initData: string; onBack: () => void }) {
-  const [reports, setReports] = useState<MyCleaningReport[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  async function load() {
-    setLoading(true); setError(null);
-    try {
-      const response = await fetch("/api/miniapp/my-cleaning-reports", {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ initData }),
-      });
-      const data = await response.json();
-      if (!response.ok || !data.ok) throw new Error(data.error || "Не удалось загрузить отчёты.");
-      setReports(Array.isArray(data.reports) ? data.reports : []);
-    } catch (e) { setError(e instanceof Error ? e.message : "Ошибка соединения."); }
-    finally { setLoading(false); }
-  }
-  useEffect(() => { load(); }, [initData]);
-  const statusLabel = (status: string) => status === "approved" ? "Утверждён" : status === "rejected" ? "Отклонён" : "Ожидает проверки";
-  const statusClass = (status: string) => status === "approved" ? "bg-green-50 border-green-200 text-green-700" : status === "rejected" ? "bg-red-50 border-red-200 text-red-700" : "bg-amber-50 border-amber-200 text-amber-800";
-
-  return (
-    <div className="p-4 max-w-md mx-auto">
-      <button onClick={onBack} className="text-sm text-gray-500 mb-3">← Назад</button>
-      <div className="flex items-center justify-between gap-2 mb-3">
-        <div><h1 className="text-base font-semibold">📋 Мои отчёты</h1><p className="text-[12px] text-gray-500">История отправок и решения руководителя</p></div>
-        <button onClick={load} disabled={loading} className="text-xs font-semibold border rounded-lg px-3 py-2 disabled:opacity-50">Обновить</button>
-      </div>
-      {loading && <p className="text-sm text-gray-500 py-6 text-center">Загрузка отчётов…</p>}
-      {error && <div className="bg-red-50 border border-red-200 text-red-700 rounded-lg p-3 text-sm">{error}</div>}
-      {!loading && !error && reports.length === 0 && <div className="bg-gray-50 border rounded-lg p-4 text-sm text-gray-500">У вас пока нет отправленных отчётов.</div>}
-      {!loading && !error && reports.length > 0 && <>
-        <div className="grid grid-cols-3 gap-2 mb-3">
-          <div className="bg-amber-50 rounded-lg p-2 text-center"><div className="text-lg font-bold text-amber-700">{reports.filter(r => r.status === "pending").length}</div><div className="text-[10px] text-amber-800">Ожидают</div></div>
-          <div className="bg-green-50 rounded-lg p-2 text-center"><div className="text-lg font-bold text-green-700">{reports.filter(r => r.status === "approved").length}</div><div className="text-[10px] text-green-800">Утверждены</div></div>
-          <div className="bg-red-50 rounded-lg p-2 text-center"><div className="text-lg font-bold text-red-700">{reports.filter(r => r.status === "rejected").length}</div><div className="text-[10px] text-red-800">Отклонены</div></div>
-        </div>
-        <div className="flex flex-col gap-2">{reports.map(report => <article key={report.id} className="border border-gray-200 rounded-xl p-3 bg-white">
-          <div className="flex items-start justify-between gap-2"><div><div className="font-semibold text-sm">ATM {report.atmCode || "без ID"}</div><div className="text-[11px] text-gray-500">{report.submittedDate} · {new Date(report.submittedAt).toLocaleTimeString("ru-RU", { timeZone: "Asia/Tashkent", hour: "2-digit", minute: "2-digit" })}</div></div><span className={`shrink-0 border rounded-full px-2 py-1 text-[10px] font-semibold ${statusClass(report.status)}`}>{statusLabel(report.status)}</span></div>
-          {report.antifraud && <div className="mt-2 text-[11px] text-amber-700 bg-amber-50 rounded-md p-2">Отчёт отмечен для дополнительной проверки.</div>}
-          {report.status !== "pending" && <div className="mt-2 text-[11px] text-gray-500">{report.reviewedAt ? `Рассмотрен: ${new Date(report.reviewedAt).toLocaleString("ru-RU", { timeZone: "Asia/Tashkent" })}` : "Решение сохранено"}</div>}
-          {report.reviewComment && <div className={`mt-2 rounded-md p-2 text-[12px] ${report.status === "rejected" ? "bg-red-50 text-red-800" : "bg-gray-50 text-gray-700"}`}><b>Комментарий руководителя:</b> {report.reviewComment}</div>}
-        </article>)}</div>
-        <p className="text-[10px] text-gray-400 mt-3">Показаны последние {reports.length} отчётов (максимум 100).</p>
-      </>}
-    </div>
-  );
-}
 
 /**
  * Экран ввода ID банкомата (заменяет выбор из списка — п.1/п.2 ТЗ).
