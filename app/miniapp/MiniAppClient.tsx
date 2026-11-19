@@ -403,11 +403,6 @@ function MyCleaningReportsScreen({ initData, onBack }: { initData: string; onBac
   );
 }
 
-type MyCleaningReport = {
-  id: string; atmCode: string; submittedAt: string; submittedDate: string;
-  status: "pending" | "approved" | "rejected" | string;
-  reviewedAt: string | null; reviewComment: string; antifraud: boolean;
-};
 
 
 /**
