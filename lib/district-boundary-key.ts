@@ -1,4 +1,4 @@
-import { normalizeGeoName, regionIdForName } from "./geography.ts";
+import { normalizeGeoName, regionIdForName } from "./geography";
 
 export function districtBoundaryKey(regionId: string | undefined, district: string): string {
   const region = (regionId || "").trim();
