@@ -50,7 +50,6 @@ export function MiniAppClient() {
   const [showAudit, setShowAudit] = useState(false);
   const [showInspectorReport, setShowInspectorReport] = useState(false);
   const [showMyReports, setShowMyReports] = useState(false);
-  const [showMyReports, setShowMyReports] = useState(false);
   const [issuePrefill, setIssuePrefill] = useState<{ atmCode: string; address: string } | null>(null);
   const [doneIds, setDoneIds] = useState<Set<string>>(new Set());
 
