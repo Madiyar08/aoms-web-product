@@ -142,9 +142,6 @@ export function MiniAppClient() {
     return <MyCleaningReportsScreen initData={initData!} onBack={() => setShowMyReports(false)} />;
   }
 
-  if (showMyReports) {
-    return <MyCleaningReportsScreen initData={initData!} onBack={() => setShowMyReports(false)} />;
-  }
 
   if (showAtmIssue) {
     return (
