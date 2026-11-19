@@ -47,7 +47,8 @@ export default async function RoutesPage({ searchParams }: { searchParams: { fro
       )}
       <p className="text-sm text-neutral-500 mb-2">
         Строится из районов, назначенных в «Расписании». Банкоматы категории «Внутри здания»
-        и неподтверждённых статусов исключаются автоматически.
+        и статусы, запрещающие выезд, исключаются автоматически. Банкоматы без корректных координат
+        в пределах Узбекистана не попадут в маршрут.
       </p>
       {!telegramReady && (
         <p className="text-[12px] text-st-orange mb-4">
@@ -115,7 +116,10 @@ export default async function RoutesPage({ searchParams }: { searchParams: { fro
                             <span> · категория не для маршрута: {route.excludedByCategory}</span>
                           )}
                           {route.excludedNoCoords > 0 && (
-                            <span> · нет координат: {route.excludedNoCoords}</span>
+                            <span> · нет/ошибочные координаты: {route.excludedNoCoords}</span>
+                          )}
+                          {(route.excludedAlreadyAssigned ?? 0) > 0 && (
+                            <span> · уже назначены другому экипажу на эту дату: {route.excludedAlreadyAssigned}</span>
                           )}
                           {route.excludedDistrictMismatch > 0 && (
                             <span>
@@ -154,6 +158,29 @@ export default async function RoutesPage({ searchParams }: { searchParams: { fro
                             </details>
                           )}
                         </div>
+                      )}
+                      {(route.excludedAtms?.length ?? 0) > 0 && (
+                        <details className="mt-2 rounded-lg border border-line bg-neutral-50 px-3 py-2">
+                          <summary className="cursor-pointer text-[12px] font-semibold text-ink">
+                            Показать исключённые банкоматы ({route.excludedAtms?.length ?? 0})
+                          </summary>
+                          <div className="mt-2 max-h-64 overflow-auto divide-y divide-line">
+                            {(route.excludedAtms ?? []).slice(0, 200).map((atm) => (
+                              <div key={`${atm.atmId}-${atm.reason}`} className="py-2 text-[11px]">
+                                <div className="font-semibold text-ink">
+                                  {atm.code || "Без ID"} · {atm.name || "Без названия"}
+                                </div>
+                                <div className="text-neutral-500">{atm.district || "Район не указан"}</div>
+                                <div className="text-st-orange">{atm.reason}</div>
+                              </div>
+                            ))}
+                            {(route.excludedAtms?.length ?? 0) > 200 && (
+                              <p className="py-2 text-[11px] text-neutral-500">
+                                Показаны первые 200 записей из {route.excludedAtms?.length ?? 0}.
+                              </p>
+                            )}
+                          </div>
+                        </details>
                       )}
                       {route.status === "Отправлен" && (
                         <div className="text-[11px] text-neutral-400 mt-1">{route.lastSendResult}</div>

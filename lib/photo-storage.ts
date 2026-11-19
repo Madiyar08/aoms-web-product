@@ -73,6 +73,26 @@ export async function savePhotoFile(dataUrl: string): Promise<string | null> {
   }
 }
 
+
+/** Сохраняет видео инспекторского отчёта на Railway Volume. Видео не перекодируется
+ * и не удаляется автоматически: до отдельной реализации Telegram-архива оно
+ * остаётся доступным по локальной ссылке. */
+export async function saveInspectorVideoFile(file: File): Promise<string | null> {
+  const allowed = new Set(["video/mp4", "video/webm", "video/quicktime"]);
+  if (!allowed.has(file.type)) return null;
+  if (file.size <= 0 || file.size > 50 * 1024 * 1024) return null;
+  const extension = file.type === "video/webm" ? "webm" : file.type === "video/quicktime" ? "mov" : "mp4";
+  try {
+    ensurePhotosDir();
+    const filename = `${newId()}.${extension}`;
+    fs.writeFileSync(path.join(PHOTOS_DIR, filename), Buffer.from(await file.arrayBuffer()), { flag: "wx" });
+    return `/api/photos/${filename}`;
+  } catch (error) {
+    console.error("[photo-storage] Не удалось сохранить видео инспектора:", error);
+    return null;
+  }
+}
+
 /**
  * Фоновый шаг (вызывать ПОСЛЕ ответа сотруднику, не блокируя его):
  * переносит уже сохранённое на диске фото в архивный Telegram-канал
@@ -85,7 +105,7 @@ export async function savePhotoFile(dataUrl: string): Promise<string | null> {
  * т.д.), если возвращён не null — иначе после удаления локального файла
  * старая ссылка перестанет открываться.
  */
-export async function archivePhotoToTelegram(diskUrl: string, caption = "Фото AOMS"): Promise<string | null> {
+export async function archivePhotoToTelegram(diskUrl: string, caption = "Фото AOMS", deleteLocal = true): Promise<string | null> {
   if (!isPhotoFileUrl(diskUrl) || diskUrl.includes("/tg_")) return null;
   const filename = diskUrl.split("/").pop()!;
   const filePath = resolvePhotoPath(filename);
@@ -95,11 +115,28 @@ export async function archivePhotoToTelegram(diskUrl: string, caption = "Фот�
     const { sendPhotoToArchive } = await import("./telegram");
     const archived = await sendPhotoToArchive(buffer, "image/jpeg", caption);
     if (!archived) return null;
-    fs.unlinkSync(filePath);
+    if (deleteLocal) fs.unlinkSync(filePath);
     return `/api/photos/tg_${archived.fileId}`;
   } catch (e) {
     console.error("[photo-storage] Фоновая архивация в Telegram не удалась:", e);
     return null;
+  }
+}
+
+
+/** Удаляет локальный файл только после того, как вызывающий код надёжно
+ * сохранил ссылку на Telegram-архив в базе данных. */
+export function deleteLocalPhotoFile(diskUrl: string): boolean {
+  if (!isPhotoFileUrl(diskUrl) || diskUrl.includes("/tg_")) return false;
+  const filename = diskUrl.split("/").pop()!;
+  const filePath = resolvePhotoPath(filename);
+  try {
+    if (!fs.existsSync(filePath)) return false;
+    fs.unlinkSync(filePath);
+    return true;
+  } catch (error) {
+    console.error("[photo-storage] Не удалось удалить локальное фото после архивации:", error);
+    return false;
   }
 }
 
@@ -237,4 +274,25 @@ export function deleteOldPhotos(olderThanDays: number): { deleted: number; freed
     }
   }
   return { deleted, freedBytes };
+}
+
+
+/** Архивирует локальное видео без удаления исходника; удаление выполняется
+ * только после сохранения новой ссылки в SQLite очередью инспекторских медиа. */
+export async function archiveInspectorVideoToTelegram(diskUrl: string, caption = "Инспекторский отчёт"): Promise<string | null> {
+  if (!isPhotoFileUrl(diskUrl) || diskUrl.includes("/tgvideo_") || diskUrl.includes("/tg_")) return null;
+  const filename = diskUrl.split("/").pop()!;
+  const filePath = resolvePhotoPath(filename);
+  try {
+    if (!fs.existsSync(filePath)) return null;
+    const buffer = fs.readFileSync(filePath);
+    const ext = filename.split(".").pop()?.toLowerCase() || "mp4";
+    const mime = ext === "webm" ? "video/webm" : ext === "mov" ? "video/quicktime" : "video/mp4";
+    const { sendVideoToArchive } = await import("./telegram");
+    const archived = await sendVideoToArchive(buffer, mime, caption, filename);
+    return archived ? `/api/photos/tgvideo_${archived.fileId}` : null;
+  } catch (error) {
+    console.error("[photo-storage] Не удалось архивировать видео:", error);
+    return null;
+  }
 }

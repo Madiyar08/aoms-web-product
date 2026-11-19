@@ -47,6 +47,10 @@ export async function GET(req: NextRequest) {
     { header: "Координаты верные", key: "coordsCorrect", width: 14 },
     { header: "Комментарий", key: "comment", width: 24 },
     { header: "Кол-во фото", key: "photoCount", width: 10 },
+    { header: "Статус проверки", key: "approvalStatus", width: 18 },
+    { header: "Проверил", key: "reviewedBy", width: 22 },
+    { header: "Время проверки", key: "reviewedAt", width: 22 },
+    { header: "Комментарий проверки", key: "reviewComment", width: 34 },
   ];
   sheet.getRow(1).font = { bold: true };
 
@@ -81,6 +85,10 @@ export async function GET(req: NextRequest) {
       coordsCorrect: r.coordsCorrect ? "да" : "нет",
       comment: r.locationComment || "",
       photoCount,
+      approvalStatus: r.approvalStatus || "pending (legacy)",
+      reviewedBy: r.reviewedBy || "",
+      reviewedAt: r.reviewedAt ? formatTashkentDateTime(r.reviewedAt) : "",
+      reviewComment: r.reviewComment || "",
     });
   }
 

@@ -1,4 +1,4 @@
-import { deleteRow, findById, insertRow, readAll, updateRow } from "./db";
+import { deleteRow, findById, insertRow, readAll, updateRow, withTransaction } from "./db";
 import { BaseEntity, newId, nowIso } from "./entity";
 import { listAtms } from "./atms";
 import { listCategories } from "./categories";
@@ -6,8 +6,11 @@ import { createStatusExclusionChecker } from "./routing-rules";
 import { getScheduleById } from "./schedule";
 import { isYandexRoutingConfigured, optimizeRouteOrder } from "./yandex-routing";
 import { getSettingValue } from "./settings";
-import { clusterNearbyPoints, nearestNeighborOrder, twoOptImprove, GeoPoint } from "./geo";
+import { clusterNearbyPoints, flattenClusterMemberIndexes, nearestNeighborOrder, twoOptImprove, GeoPoint } from "./geo";
 import { todayTashkent } from "./tz";
+import { isValidRouteCoordinate } from "./route-coordinate";
+import { findAlreadyAssignedAtmIds } from "./route-assignment";
+import { normalizeRouteExcludedAtms, RouteExcludedAtmDetail } from "./route-exclusion-details";
 
 const TABLE = "routes";
 
@@ -17,6 +20,8 @@ const CLUSTER_THRESHOLD_M = 30;
 /** Публичная ссылка yandex.ru/maps?rtext=... перестаёт открываться в приложении,
  * если точек больше этого числа — поэтому длинные маршруты режем на отрезки. */
 const MAX_POINTS_PER_YANDEX_LINK = 20;
+
+export type RouteExcludedAtm = RouteExcludedAtmDetail;
 
 export interface RouteEntry extends BaseEntity {
   scheduleId: string;
@@ -30,6 +35,10 @@ export interface RouteEntry extends BaseEntity {
   excludedByStatusDetail: Record<string, number>;
   excludedNoCoords: number;
   excludedDistrictMismatch: number;
+  /** ATM already assigned to another crew on the same date. */
+  excludedAlreadyAssigned?: number;
+  /** Детализация исключённых ATM для разбора руководителем. */
+  excludedAtms?: RouteExcludedAtm[];
   remainingForTomorrow: number;
   /** Одна или несколько ссылок — маршрут режется на отрезки по MAX_POINTS_PER_YANDEX_LINK точек,
    * т.к. Яндекс.Карты не открывают построение маршрута по ссылке, если точек больше лимита. */
@@ -63,6 +72,8 @@ function normalizeRoute(route: RouteEntry): RouteEntry {
     optimizationNote: route.optimizationNote ?? "",
     excludedByCategoryDetail: route.excludedByCategoryDetail ?? {},
     excludedByStatusDetail: route.excludedByStatusDetail ?? {},
+    excludedAlreadyAssigned: route.excludedAlreadyAssigned ?? 0,
+    excludedAtms: normalizeRouteExcludedAtms(route.excludedAtms),
   };
 }
 
@@ -191,6 +202,7 @@ function computeEligibleAtms(schedule: { districts: string[] }): {
   excludedNoCoords: number;
   excludedByCategoryDetail: Record<string, number>;
   excludedByStatusDetail: Record<string, number>;
+  excludedAtms: RouteExcludedAtm[];
 } {
   const categories = listCategories();
   const excludedCategoryIds = new Set(categories.filter((c) => c.excludedFromRouting).map((c) => c.id));
@@ -233,29 +245,34 @@ function computeEligibleAtms(schedule: { districts: string[] }): {
   let excludedNoCoords = 0;
   const excludedByCategoryDetail: Record<string, number> = {};
   const excludedByStatusDetail: Record<string, number> = {};
+  const excludedAtms: RouteExcludedAtm[] = [];
   const eligible = candidateAtms.filter((a) => {
     if (a.categoryId && excludedCategoryIds.has(a.categoryId)) {
       excludedByCategory += 1;
       const name = categoryNameById.get(a.categoryId) || "(неизвестная категория)";
       excludedByCategoryDetail[name] = (excludedByCategoryDetail[name] || 0) + 1;
+      excludedAtms.push({ atmId: a.id, code: a.code || "", name: a.name || "", district: a.district || "", reason: `Категория: ${name}` });
       return false;
     }
     const statusLabel = statusExclusionLabel(a);
     if (statusLabel) {
       excludedByStatus += 1;
       excludedByStatusDetail[statusLabel] = (excludedByStatusDetail[statusLabel] || 0) + 1;
+      excludedAtms.push({ atmId: a.id, code: a.code || "", name: a.name || "", district: a.district || "", reason: `Статус: ${statusLabel}` });
       return false;
     }
-    const lat = parseFloat(a.latitude);
-    const lon = parseFloat(a.longitude);
-    if (Number.isNaN(lat) || Number.isNaN(lon)) {
+    // A coordinate pair must be finite and inside Uzbekistan. parseFloat alone
+    // accepts malformed values such as "41.3oops" and Infinity/0,0 can leak
+    // into routing links and send crews to an unrelated location.
+    if (!isValidRouteCoordinate(a.latitude, a.longitude)) {
       excludedNoCoords += 1;
+      excludedAtms.push({ atmId: a.id, code: a.code || "", name: a.name || "", district: a.district || "", reason: "Нет координат или координаты некорректны" });
       return false;
     }
     return true;
   });
 
-  return { eligible, excludedByCategory, excludedByStatus, excludedNoCoords, excludedByCategoryDetail, excludedByStatusDetail };
+  return { eligible, excludedByCategory, excludedByStatus, excludedNoCoords, excludedByCategoryDetail, excludedByStatusDetail, excludedAtms };
 }
 
 export async function buildRouteForSchedule(scheduleId: string): Promise<RouteEntry | { error: string }> {
@@ -269,9 +286,27 @@ export async function buildRouteForSchedule(scheduleId: string): Promise<RouteEn
     excludedNoCoords,
     excludedByCategoryDetail,
     excludedByStatusDetail,
+    excludedAtms: baseExcludedAtms,
   } = computeEligibleAtms(schedule);
-  const excludedDistrictMismatch = 0; // всегда 0 — отбор по полигону делает эту проверку не нужной
-  let eligible = eligibleAtms;
+  const excludedDistrictMismatch = 0; // точный отбор по району; полигоны не используются в маршрутизации
+  // Один ATM не должен попасть в два экипажа в один день. Уже построенные
+  // маршруты других назначений считаются занятыми; свой маршрут при пересчёте
+  // не блокирует собственные точки.
+  const alreadyAssigned = findAlreadyAssignedAtmIds(
+    eligibleAtms.map((a) => a.id), listRoutes(), schedule.date, scheduleId
+  );
+  let eligible = eligibleAtms.filter((a) => !alreadyAssigned.has(a.id));
+  const excludedAlreadyAssigned = alreadyAssigned.size;
+  const alreadyAssignedDetails: RouteExcludedAtm[] = eligibleAtms
+    .filter((atm) => alreadyAssigned.has(atm.id))
+    .map((atm) => ({
+      atmId: atm.id,
+      code: atm.code || "",
+      name: atm.name || "",
+      district: atm.district || "",
+      reason: "Уже назначен другому экипажу на эту дату",
+    }));
+  const excludedAtms = [...baseExcludedAtms, ...alreadyAssignedDetails];
 
   // Приоритет по дате последней очистки (п.10): банкоматы, очищенные
   // недавно, уходят в конец очереди объезда — давно не обслуженные едут
@@ -346,9 +381,10 @@ export async function buildRouteForSchedule(scheduleId: string): Promise<RouteEn
     optimizationNote += ` Территория больше дневной нормы (KPI ${schedule.kpiTarget}) — ${remainingForTomorrow} точек перенесено на следующий раз (самые давно необслуженные вошли в этот маршрут).`;
   }
 
-  // Разворачиваем порядок кластеров обратно в порядок банкоматов
-  // (внутри одной остановки — как были найдены).
-  eligible = clusterOrder.flatMap((clusterIdx) => clusters[clusterIdx].memberIndexes.map((i) => eligible[i]));
+  // Разворачиваем порядок кластеров обратно в порядок банкоматов.
+  // Все ATM одной физической остановки (включая Smart ATM рядом друг
+  // с другом) остаются подряд и не разрываются оптимизацией.
+  eligible = flattenClusterMemberIndexes(clusters, clusterOrder).map((index) => eligible[index]);
   const orderedStopPoints = clusterOrder.map((clusterIdx) => clusters[clusterIdx].point);
 
   const yandexUrls = buildYandexRouteUrls(orderedStopPoints);
@@ -356,7 +392,7 @@ export async function buildRouteForSchedule(scheduleId: string): Promise<RouteEn
     optimizationNote += ` Маршрут разбит на ${yandexUrls.length} ссылки (лимит Яндекс.Карт — ${MAX_POINTS_PER_YANDEX_LINK} точек на ссылку) — открывайте по очереди.`;
   }
 
-  const excludedCount = excludedByCategory + excludedByStatus + excludedNoCoords + excludedDistrictMismatch;
+  const excludedCount = excludedByCategory + excludedByStatus + excludedNoCoords + excludedDistrictMismatch + excludedAlreadyAssigned;
 
   const existing = getRouteByScheduleId(scheduleId);
   const commonFields = {
@@ -368,6 +404,8 @@ export async function buildRouteForSchedule(scheduleId: string): Promise<RouteEn
     excludedByStatusDetail,
     excludedNoCoords,
     excludedDistrictMismatch,
+    excludedAlreadyAssigned,
+    excludedAtms,
     remainingForTomorrow,
     yandexUrls,
     stopsCount: clusters.length,
@@ -375,24 +413,41 @@ export async function buildRouteForSchedule(scheduleId: string): Promise<RouteEn
     optimizationNote,
   };
 
-  if (existing) {
-    updateRow<RouteEntry>(TABLE, existing.id, { ...commonFields, updatedAt: nowIso() });
-    return { ...existing, ...commonFields };
-  }
+  // Final guard is deliberately synchronous and transactional. Route
+  // optimization above may await an external API; another crew can finish
+  // building while this request is waiting. Re-check immediately before
+  // persistence so the same ATM cannot be committed to two crews.
+  return withTransaction(() => {
+    const latestRoutes = listRoutes();
+    const lateConflicts = findAlreadyAssignedAtmIds(
+      commonFields.atmIds, latestRoutes, schedule.date, scheduleId
+    );
+    if (lateConflicts.size > 0) {
+      return {
+        error: `Маршрут не сохранён: ${lateConflicts.size} банкомат(ов) уже назначены другому экипажу на ${schedule.date}. Перестройте маршрут повторно.`,
+      };
+    }
 
-  const row: RouteEntry = {
-    id: newId(),
-    createdAt: nowIso(),
-    updatedAt: nowIso(),
-    scheduleId,
-    date: schedule.date,
-    machineId: schedule.machineId,
-    status: "Построен",
-    lastSendResult: "",
-    ...commonFields,
-  };
-  insertRow(TABLE, row);
-  return row;
+    const latestExisting = latestRoutes.find((r) => r.scheduleId === scheduleId);
+    if (latestExisting) {
+      updateRow<RouteEntry>(TABLE, latestExisting.id, { ...commonFields, updatedAt: nowIso() });
+      return { ...latestExisting, ...commonFields };
+    }
+
+    const row: RouteEntry = {
+      id: newId(),
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+      scheduleId,
+      date: schedule.date,
+      machineId: schedule.machineId,
+      status: "Построен",
+      lastSendResult: "",
+      ...commonFields,
+    };
+    insertRow(TABLE, row);
+    return row;
+  });
 }
 
 export function markRouteSent(routeId: string, resultText: string): boolean {

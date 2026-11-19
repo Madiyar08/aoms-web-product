@@ -1,3 +1,12 @@
+## Финальный аудит Iteration 44
+
+Результаты последней локальной проверки и ограничения перед production описаны в `QA-REPORT-ITERATION-44.md`. Чек-лист безопасного релиза — `DEPLOYMENT-CHECKLIST-ITERATION-44.md`. Важно: 113/113 автоматических тестов проходят, но TypeScript и Next.js production build не были запущены, поскольку установка npm-зависимостей дважды превысила доступный лимит времени. Проект нельзя считать production-ready до прохождения всех пунктов чек-листа на staging.
+
+
+## Iteration 39 — warehouse crew attribution and inventory protection
+
+Warehouse issues can now be attributed to an existing crew; server-side validation rejects unknown crews or crew attribution on receipts. The warehouse workspace includes crew issue summaries and preserves archived material names in the ledger. Archiving a material with nonzero stock is now blocked inside a transaction. See `README-ITERATION-39.md` for verification and limitations.
+
 # AOMS Web — ATM Operations Management System (Next.js)
 
 Вторая версия интерфейса руководителя/администратора — на React/Next.js
@@ -83,6 +92,7 @@ RAILPACK_INSTALL_CMD=npm ci --include=dev
 ```
 AOMS_SQLITE_DB_PATH=/data/aoms.db
 TELEGRAM_BOT_TOKEN=токен_от_BotFather
+TELEGRAM_WEBHOOK_SECRET=случайный_секрет_не_короче_32_символов
 TELEGRAM_BOT_USERNAME=имя_бота_без_@
 TELEGRAM_GROUP_CHAT_ID=
 TELEGRAM_TECHNICIAN_CHAT_ID=
@@ -99,11 +109,15 @@ TELEGRAM_MANAGER_CHAT_ID=
 
 ### Шаг 6 — подключить Telegram-бота к этому адресу
 
+Перед настройкой webhook добавьте в Railway переменную `TELEGRAM_WEBHOOK_SECRET` — случайную строку не короче 32 символов (например, сгенерируйте локально командой `openssl rand -hex 32`). Без этой переменной endpoint webhook намеренно отвечает `503`; при неверном заголовке Telegram запрос получает `401`. Не публикуйте секрет в GitHub.
+
+
 Раз у приложения теперь есть постоянный публичный адрес — **бот работает прямо на Railway, ноутбук для этого не нужен**. Настраиваем вебхук (как и планировалось изначально, просто теперь есть куда его указать):
 
 ```bash
 curl -X POST https://api.telegram.org/bot<ТОКЕН>/setWebhook \
-  -d "url=https://aoms-web-production.up.railway.app/api/telegram/webhook"
+  -d "url=https://aoms-web-production.up.railway.app/api/telegram/webhook" \
+  -d "secret_token=<TELEGRAM_WEBHOOK_SECRET>"
 ```
 
 Дальше — как описано выше: у каждого сотрудника на странице «Сотрудники» появится ссылка для подключения; чтобы узнать chat_id техника/руководителя/группы — напишите боту `/myid`.
@@ -227,7 +241,8 @@ API — это разные вещи, разная регистрация).
 4. Один раз выполнить (замените токен и домен):
    ```bash
    curl -X POST https://api.telegram.org/bot<TOKEN>/setWebhook \
-     -d "url=https://ваш-домен/api/telegram/webhook"
+     -d "url=https://ваш-домен/api/telegram/webhook" \
+     -d "secret_token=<TELEGRAM_WEBHOOK_SECRET>"
    ```
 5. Зайти на страницу «Сотрудники» → у каждого появится ссылка
    «ссылка для подключения» → сотрудник переходит по ней в Telegram,
@@ -360,3 +375,127 @@ HTTP-запросы (создание/поиск/удаление банкома
 3. Маршруты — с учётом `excludedFromRouting` и объединения точек в одну остановку
 4. Telegram Mini App (нужен токен бота от @BotFather) + антифрод (GPS, камера, 20 м)
 5. Отчёты (без бензина) + модуль «Водитель» (одометр + топливо)
+
+## Надёжная доставка отчётов (AOMS 2.0 iteration)
+
+Отчёт об очистке, запись идемпотентности и задача Telegram-доставки фиксируются одной транзакцией SQLite. HTTP API возвращает подтверждение после сохранения отчёта и постановки задачи в очередь; сетевые запросы Telegram выполняет worker, запущенный через `instrumentation.ts` в постоянном Node.js runtime.
+
+Очередь хранится в таблице `delivery_queue` в той же SQLite-базе. Состояния: `pending`, `processing`, `completed`, `failed`. Задачи получают lease, просроченные `processing` возвращаются в обработку после рестарта, повторные попытки используют экспоненциальную задержку (до 15 минут), максимум 12 попыток. Успешные подэтапы (рабочее уведомление и уведомление руководителя) фиксируются отдельно, чтобы при повторе не отправлять их снова после обычной ошибки следующего этапа. Фото удаляется с Volume только после сохранения Telegram file_id в записи отчёта.
+
+Страница `/delivery-queue` показывает состояние доставки и позволяет повторно запустить завершившиеся ошибкой задания. Очередь рассчитана на постоянный Node.js процесс Railway и общий SQLite Volume; не переводите приложение на serverless runtime без отдельного worker-сервиса.
+
+## Регионы ATM
+
+В модель ATM добавлены необязательные `region` и `regionId`; старые JSON-записи остаются валидными и не требуют преобразования. Импорт Excel распознаёт колонки региона и района, а также основные поля по заголовкам; прежний формат с заголовками-группами районов продолжает поддерживаться. Обновление существующих ATM выполняется по нормализованному ID. Запись изменений импорта обёрнута в SQLite-транзакцию.
+
+Справочник 14 регионов находится в `lib/geography.ts`. Неизвестные названия сохраняются как пользовательские значения, чтобы расширять справочник без правки кода. Это пока не заменяет проверку административных границ по GeoJSON: официальные геометрии границ должны быть добавлены отдельно из проверяемого источника.
+
+## Unit tests (Node.js 22.16+)
+
+Run focused tests for the data-driven Uzbekistan geography module:
+
+```bash
+npm run test:unit
+```
+
+The test command uses Node's built-in test runner and type stripping; it does not require a third-party test framework.
+
+
+## Iteration 17 — аудит административных изменений
+
+Журнал аудита теперь фиксирует ручные операции с ATM (включая массовые действия), расписанием и повторяющимся расписанием, сотрудниками, машинами и Telegram-привязками. Запись аудита выполняется в той же SQLite-транзакции, что и изменение данных. В деталях не сохраняются номера телефонов, Telegram chat ID и текст комментариев.
+
+Ограничения: веб-панель всё ещё использует общий `ADMIN_PASSWORD`, поэтому актор не является персональным пользователем. Импорт Excel и часть системных API ещё не полностью покрыты аудитом. Журнал не является криптографически неизменяемым. См. `docs/AOMS-2.0-IMPLEMENTATION-STATUS.md`.
+
+## Iteration 18 security note
+
+The administration middleware now fails closed when `ADMIN_PASSWORD` is not configured. Set this environment variable before opening the web administration interface. See `docs/AOMS-2.0-ITERATION-18.md` for the change and verification limits.
+
+
+## Iteration 20 — API RBAC enforcement
+
+See [docs/ITERATION-20-API-RBAC.md](docs/ITERATION-20-API-RBAC.md) for the API role policy, compatibility notes, and verification status.
+
+## Iteration 22 — складской модуль
+
+Добавлен базовый складской учёт: позиции материалов, минимальные остатки, журнал приходов и расходов, запрет расхода сверх остатка, мягкое архивирование и записи Audit Log. Доступ разделён разрешениями `warehouse:read` и `warehouse:write`. Подробности и ограничения — в `README-ITERATION-22.md`.
+
+
+## Latest UI update
+See `README-ITERATION-24.md` for the schedule workspace redesign and verification status.
+
+
+## Iteration 26 — карта мониторинга
+
+См. `README-ITERATION-26.md`: интерактивная карта ATM, отчётов и проблем с учётом геофильтров и только реально сохранённых полигонов районов.
+
+## Iteration 27 — ATM data quality workspace
+
+See [README-ITERATION-27.md](./README-ITERATION-27.md) for the data-quality indicators, filters, selection behavior fix and verification status.
+
+## Последние изменения
+
+- Iteration 28: безопасный импорт Excel — предварительное выявление повторяющихся ID внутри файла и базы; серверная блокировка неоднозначного импорта в транзакции. Подробности: `README-ITERATION-28.md`.
+
+## Recent work
+- Iteration 29 adds an ATM-specific change timeline combining immutable administrative audit events and employee-submitted change signals. See `README-ITERATION-29.md`.
+
+## Latest work
+
+See `README-ITERATION-30.md` for the Excel import row-diagnostics update and verification results.
+
+## Последние изменения
+
+- Iteration 31: серверная валидация границ районов — проверка диапазонов координат, допустимой структуры (центр или полигон), нулевой площади и самопересечений. См. `README-ITERATION-31.md`.
+
+## Iteration 32 — защита координат маршрутов
+
+Построение маршрутов теперь принимает только конечные координаты в пределах Узбекистана. Пустые, повреждённые, бесконечные и выходящие за страновой диапазон координаты учитываются как исключённые. Подробности — `README-ITERATION-32.md`.
+
+Шаблон подготовки реестра ATM для импорта: `AOMS_ATM_Import_Template.xlsx` (выдаётся отдельным файлом; содержит лист инструкции, основной лист импорта и пример).
+
+## Последняя итерация
+
+**Iteration 33 — защита от двойного назначения ATM:** при построении маршрута банкоматы, уже закреплённые за другим экипажем на ту же дату, исключаются. Перед сохранением выполняется повторная проверка в SQLite-транзакции, чтобы закрыть гонку при параллельной оптимизации маршрутов. См. `README-ITERATION-33.md`.
+
+## Последние изменения
+
+- Iteration 34: Smart ATM / физические остановки маршрута — кластеризация теперь проверяет расстояние до каждого участника, исключая ошибочное объединение цепочек; после оптимизации все ATM одной остановки остаются последовательными. Подробности: `README-ITERATION-34.md`.
+
+## Recent development
+
+- Iteration 35 adds per-ATM route exclusion diagnostics and backward-compatible normalization. See `README-ITERATION-35.md`.
+
+## Iteration 36
+
+В отчётность добавлены отдельные показатели антифрод-проверки и качества GPS. Подробности и ограничение по отсутствующему approval workflow: `README-ITERATION-36.md`.
+
+
+## Iteration 37 — проверка отчётов очистки
+
+- Новые отчёты Mini App создаются со статусом `pending` (включая старые записи без статуса, которые трактуются как ожидающие решения).
+- Добавлен экран `/cleaning-review` для утверждения или отклонения отчётов руководителем.
+- Решение защищено RBAC (`cleaning_reports:review`) и записывается в append-only audit log в одной SQLite-транзакции с обновлением отчёта.
+- KPI в `lib/reports.ts` учитывает только явно утверждённые отчёты; ожидающие и отклонённые показываются отдельно.
+- Ежедневный Excel-экспорт включает статус проверки, проверившего, время и комментарий.
+- Полный TypeScript/Next production build не проверен в этой среде: `node_modules` отсутствует. Не применять ZIP к production до проверки сборки и теста на копии БД.
+
+## Recent iteration
+
+See `README-ITERATION-38.md` for the employee Mini App cleaning-report history, its Telegram-authenticated API, privacy-limited response fields and verification status.
+
+## Последнее обновление
+
+См. `README-ITERATION-40.md` — ограничение полного экспорта реестра ATM и матрицы покрытия только ролью `super_admin`.
+
+## Последние изменения
+
+- Iteration 41: серверные проверки RBAC добавлены непосредственно во все основные изменяющие Server Actions (ATM, импорт, расписание, маршруты, экипажи, сотрудники, проблемные ATM, настройки, гео-кластеры и очередь доставки). Подробности — `README-ITERATION-41.md`.
+
+## Последнее обновление
+
+- Iteration 42: усилена работа SQLite-транзакций, добавлены вложенные SAVEPOINT, проверка имён таблиц, диагностика `quick_check` и интеграционные тесты на временной БД. Подробности — `README-ITERATION-42.md`.
+
+## Последние изменения
+
+- Iteration 43: атомарное сохранение подтверждённой Telegram-архивации фото/видео в отчёте и очереди; локальные медиа удаляются только после успешного commit. См. `README-ITERATION-43.md`.

@@ -5,6 +5,9 @@ import { listCategories } from "@/lib/categories";
 import { listStatuses } from "@/lib/statuses";
 import { listReportsByAtm } from "@/lib/cleaning-reports";
 import { formatTashkentDateTime } from "@/lib/tz";
+import { listAuditEventsForEntity } from "@/lib/audit-log";
+import { listChangeRequests } from "@/lib/atm-change-history";
+import { atmChangeStatusLabel, atmChangeSummary, atmChangeTypeLabel } from "@/lib/atm-history-view";
 import { updateAtmAction } from "../actions";
 import { DeleteAtmButton } from "./DeleteAtmButton";
 
@@ -18,6 +21,8 @@ export default async function AtmDetailPage({ params }: { params: { id: string }
   const statuses = listStatuses();
   const v = verificationStatus(atm);
   const reports = listReportsByAtm(atm.id);
+  const auditEvents = listAuditEventsForEntity("atm", atm.id, 100);
+  const changeSignals = listChangeRequests().filter((request) => request.atmId === atm.id);
 
   return (
     <div>
@@ -48,6 +53,18 @@ export default async function AtmDetailPage({ params }: { params: { id: string }
         </Field>
         <Field label="Адрес" full>
           <input name="address" defaultValue={atm.address} className="input" />
+        </Field>
+        <Field label="Регион">
+          <input name="region" defaultValue={atm.region || ""} list="aoms-regions" className="input" />
+          <datalist id="aoms-regions">
+            <option value="Республика Каракалпакстан" /><option value="Андижанская область" />
+            <option value="Бухарская область" /><option value="Джизакская область" />
+            <option value="Кашкадарьинская область" /><option value="Навоийская область" />
+            <option value="Наманганская область" /><option value="Самаркандская область" />
+            <option value="Сурхандарьинская область" /><option value="Сырдарьинская область" />
+            <option value="Ташкентская область" /><option value="Ферганская область" />
+            <option value="Хорезмская область" /><option value="Город Ташкент" />
+          </datalist>
         </Field>
         <Field label="Район">
           <input name="district" defaultValue={atm.district} className="input" />
@@ -99,7 +116,53 @@ export default async function AtmDetailPage({ params }: { params: { id: string }
         </div>
       </form>
 
-      <div className="mt-5 max-w-3xl">
+      <section className="mt-6 max-w-3xl" aria-labelledby="atm-history-heading">
+        <div className="flex items-end justify-between gap-3 mb-3">
+          <div>
+            <h2 id="atm-history-heading" className="font-display text-lg font-medium text-ink">История изменений</h2>
+            <p className="text-xs text-neutral-500 mt-1">Действия администраторов и сигналы сотрудников по этому банкомату</p>
+          </div>
+          <span className="text-xs text-neutral-400">{auditEvents.length + changeSignals.length} событий</span>
+        </div>
+        {auditEvents.length === 0 && changeSignals.length === 0 ? (
+          <div className="bg-white border border-line rounded-[10px] p-4 text-sm text-neutral-500">История изменений пока пуста. Новые изменения будут отображаться здесь.</div>
+        ) : (
+          <div className="bg-white border border-line rounded-[10px] divide-y divide-line">
+            {auditEvents.map((event) => {
+              let details: { changedFields?: string[]; code?: string } = {};
+              try { details = JSON.parse(event.detailsJson || "{}"); } catch { /* сохраняем событие даже при старом формате деталей */ }
+              const fields = (details.changedFields || []).join(", ");
+              const actionLabel = event.action === "atm.created" ? "Банкомат создан" : event.action === "atm.deleted" ? "Банкомат удалён" : event.action === "atm.updated" ? "Данные обновлены" : event.action === "atm.bulk_updated" ? "Массовое изменение" : event.action;
+              return (
+                <div key={event.id} className="p-4 flex flex-wrap items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="text-sm font-semibold text-ink">{actionLabel}</div>
+                    <div className="text-xs text-neutral-500 mt-1">{event.actorLabel || "Системный пользователь"} · {event.actorRole || "роль не указана"}</div>
+                    {fields && <div className="text-xs text-neutral-600 mt-1">Изменены поля: {fields}</div>}
+                  </div>
+                  <time className="text-xs text-neutral-400 whitespace-nowrap">{formatTashkentDateTime(event.createdAt)}</time>
+                </div>
+              );
+            })}
+            {changeSignals.map((signal) => (
+              <div key={signal.id} className="p-4 flex flex-wrap items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-sm font-semibold text-ink">{atmChangeTypeLabel(signal.changeType)}</span>
+                    <span className={`text-[10px] rounded-full px-2 py-0.5 ${signal.status === "applied" ? "bg-emerald-50 text-emerald-700" : signal.status === "rejected" ? "bg-red-50 text-red-700" : "bg-amber-50 text-amber-700"}`}>{atmChangeStatusLabel(signal.status)}</span>
+                  </div>
+                  <div className="text-xs text-neutral-600 mt-1">{atmChangeSummary(signal)}</div>
+                  <div className="text-xs text-neutral-500 mt-1">{signal.employeeName} · дата отчёта {signal.reportDate}</div>
+                  {signal.comment && <p className="text-xs text-neutral-500 mt-1">«{signal.comment}»</p>}
+                </div>
+                <time className="text-xs text-neutral-400 whitespace-nowrap">{formatTashkentDateTime(signal.createdAt)}</time>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+
+      <div className="mt-6 max-w-3xl">
         <h2 className="font-display text-lg font-medium text-ink mb-3">
           История очисток {reports.length > 0 && `(${reports.length})`}
         </h2>

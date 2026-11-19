@@ -16,8 +16,10 @@ interface Point {
   lon: number;
 }
 
+interface RegionOption { id: string; name: string; districts: string[]; }
+
 interface Props {
-  districts: string[];
+  regions: RegionOption[];
   initialBoundaries: Record<string, Point[]>;
   centerLat: number;
   centerLon: number;
@@ -30,7 +32,7 @@ interface Props {
  * "банкомат внутри своего района или нет" (см. lib/district-boundaries.ts) —
  * заменяет прежний грубый метод по среднему координат.
  */
-export default function DistrictBoundaryMap({ districts, initialBoundaries, centerLat, centerLon }: Props) {
+export default function DistrictBoundaryMap({ regions, initialBoundaries, centerLat, centerLon }: Props) {
   const mapRef = useRef<HTMLDivElement>(null);
   const mapInstance = useRef<L.Map | null>(null);
   const polygonLayer = useRef<L.Polygon | null>(null);
@@ -38,8 +40,12 @@ export default function DistrictBoundaryMap({ districts, initialBoundaries, cent
   const markersLayer = useRef<L.LayerGroup | null>(null);
   const allBoundariesLayer = useRef<L.LayerGroup | null>(null);
 
+  const [selectedRegionId, setSelectedRegionId] = useState(regions[0]?.id || "legacy");
+  const selectedRegion = regions.find((r) => r.id === selectedRegionId);
+  const districts = selectedRegion?.districts || [];
   const [selectedDistrict, setSelectedDistrict] = useState(districts[0] || "");
-  const [points, setPoints] = useState<Point[]>(initialBoundaries[districts[0]] || []);
+  const boundaryKey = (district: string, regionId = selectedRegionId) => `${regionId}:${district}`;
+  const [points, setPoints] = useState<Point[]>(initialBoundaries[boundaryKey(districts[0] || "")] || []);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [showAll, setShowAll] = useState(true);
@@ -73,8 +79,9 @@ export default function DistrictBoundaryMap({ districts, initialBoundaries, cent
     if (!allBoundariesLayer.current) return;
     allBoundariesLayer.current.clearLayers();
     if (!showAll) return;
-    Object.entries(initialBoundaries).forEach(([district, pts]) => {
-      if (district === selectedDistrict || pts.length < 3) return;
+    Object.entries(initialBoundaries).forEach(([scopedKey, pts]) => {
+      const [regionId, district] = scopedKey.split(":");
+      if (regionId !== selectedRegionId || district === selectedDistrict || pts.length < 3) return;
       const poly = Lm.polygon(
         pts.map((p) => [p.lat, p.lon] as [number, number]),
         { color: "#A9782F", weight: 1, fillOpacity: 0.05 }
@@ -121,7 +128,7 @@ export default function DistrictBoundaryMap({ districts, initialBoundaries, cent
     if (!mapInstance.current) return;
     import("leaflet").then((leaflet) => redrawAllBoundaries(leaflet.default, mapInstance.current!));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showAll, selectedDistrict]);
+  }, [showAll, selectedDistrict, selectedRegionId]);
 
   // Эталонная граница из OpenStreetMap — рисуется отдельным пунктирным
   // слоем поверх карты как подсказка, чтобы обводить не по пустому месту.
@@ -152,7 +159,7 @@ export default function DistrictBoundaryMap({ districts, initialBoundaries, cent
       const res = await fetch("/api/district-boundaries/fetch-reference", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ district: selectedDistrict }),
+        body: JSON.stringify({ district: selectedDistrict, regionId: selectedRegionId === "legacy" ? undefined : selectedRegionId, region: selectedRegion?.name }),
       });
       const data = await res.json();
       if (data.ok) {
@@ -176,7 +183,7 @@ export default function DistrictBoundaryMap({ districts, initialBoundaries, cent
 
   function handleSelectDistrict(d: string) {
     setSelectedDistrict(d);
-    setPoints(initialBoundaries[d] || []);
+    setPoints(initialBoundaries[boundaryKey(d)] || []);
     setMessage(null);
   }
 
@@ -204,11 +211,11 @@ export default function DistrictBoundaryMap({ districts, initialBoundaries, cent
       const res = await fetch("/api/district-boundaries", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ district: selectedDistrict, points: pts }),
+        body: JSON.stringify({ district: selectedDistrict, regionId: selectedRegionId === "legacy" ? undefined : selectedRegionId, region: selectedRegion?.name, points: pts }),
       });
       const data = await res.json();
       if (data.ok) {
-        initialBoundaries[selectedDistrict] = pts;
+        initialBoundaries[boundaryKey(selectedDistrict)] = pts;
         setPoints(pts);
         setMessage(pts.length === 1 ? "Центр района сохранён ✓" : "Граница сохранена ✓");
       } else {
@@ -237,6 +244,15 @@ export default function DistrictBoundaryMap({ districts, initialBoundaries, cent
   return (
     <div className="flex gap-4">
       <div className="w-64 shrink-0">
+        {regions.length === 0 ? <p className="text-sm text-neutral-500">Нет районов в базе банкоматов или сохранённых границ.</p> : null}
+        <label className="block text-[11px] font-semibold text-neutral-500 mb-1">Регион</label>
+        <select
+          value={selectedRegionId}
+          onChange={(e) => { const next = regions.find((r) => r.id === e.target.value); setSelectedRegionId(e.target.value); setSelectedDistrict(next?.districts[0] || ""); setPoints(initialBoundaries[`${e.target.value}:${next?.districts[0] || ""}`] || []); setMessage(null); }}
+          className="input w-full mb-3"
+        >
+          {regions.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
+        </select>
         <label className="block text-[11px] font-semibold text-neutral-500 mb-1">Район</label>
         <select
           value={selectedDistrict}
@@ -245,7 +261,7 @@ export default function DistrictBoundaryMap({ districts, initialBoundaries, cent
         >
           {districts.map((d) => (
             <option key={d} value={d}>
-              {d} {initialBoundaries[d]?.length >= 1 ? "✓" : ""}
+              {d} {initialBoundaries[boundaryKey(d)]?.length >= 1 ? "✓" : ""}
             </option>
           ))}
         </select>
@@ -269,10 +285,10 @@ export default function DistrictBoundaryMap({ districts, initialBoundaries, cent
           >
             {saving ? "Сохранение…" : "Сохранить как центр района"}
           </button>
-          {initialBoundaries[selectedDistrict]?.length === 1 && (
+          {initialBoundaries[boundaryKey(selectedDistrict)]?.length === 1 && (
             <p className="text-[11px] text-route mt-2">
-              ✓ Центр уже задан: {initialBoundaries[selectedDistrict][0].lat.toFixed(4)},{" "}
-              {initialBoundaries[selectedDistrict][0].lon.toFixed(4)}
+              ✓ Центр уже задан: {initialBoundaries[boundaryKey(selectedDistrict)][0].lat.toFixed(4)},{" "}
+              {initialBoundaries[boundaryKey(selectedDistrict)][0].lon.toFixed(4)}
             </p>
           )}
         </div>
@@ -332,10 +348,10 @@ export default function DistrictBoundaryMap({ districts, initialBoundaries, cent
         {message && <div className="text-[12px] bg-neutral-50 rounded-lg p-2">{message}</div>}
 
         <div className="text-[11px] text-neutral-400 mt-4">
-          Задано (центр или граница): {Object.values(initialBoundaries).filter((p) => p.length >= 1).length} из {districts.length}
+          Задано (центр или граница): {districts.filter((d) => (initialBoundaries[boundaryKey(d)]?.length || 0) >= 1).length} из {districts.length}
         </div>
         {(() => {
-          const missing = districts.filter((d) => !(initialBoundaries[d]?.length >= 1));
+          const missing = districts.filter((d) => !(initialBoundaries[boundaryKey(d)]?.length >= 1));
           if (missing.length === 0) return null;
           return (
             <div className="mt-2 bg-brass-bg border border-brass/30 rounded-lg p-2">
@@ -344,7 +360,7 @@ export default function DistrictBoundaryMap({ districts, initialBoundaries, cent
                 {missing.map((d) => (
                   <button
                     key={d}
-                    onClick={() => setSelectedDistrict(d)}
+                    onClick={() => handleSelectDistrict(d)}
                     className="text-[11px] bg-white border border-line rounded-full px-2 py-0.5 hover:border-brass"
                   >
                     {d}

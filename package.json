@@ -8,7 +8,8 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "NODE_OPTIONS='--experimental-sqlite --no-warnings' next start -p ${PORT:-3000}"
+    "start": "NODE_OPTIONS='--experimental-sqlite --no-warnings' next start -p ${PORT:-3000}",
+    "test:unit": "node --experimental-strip-types --test tests/*.test.mjs"
   },
   "dependencies": {
     "exceljs": "^4.4.0",

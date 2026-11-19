@@ -5,6 +5,7 @@ import { listCleaningReports } from "./cleaning-reports";
 import { getAtmById } from "./atms";
 import { countDistinctPoints } from "./coordinate-analysis";
 import { tashkentDateString } from "./tz";
+import { summarizeReportQuality } from "./report-quality";
 
 /**
  * Отчёт строится из «Расписания» + «Маршрутов» (ПЛАН на день) и реальных
@@ -38,9 +39,14 @@ export interface ReportRow {
   doneInRoute: number;
   doneOutOfRoute: number;
   doneTotal: number;
+  pendingReports: number;
+  rejectedReports: number;
   doneStops: number;
   donePct: number;
   excludedCount: number;
+  reviewCount: number;
+  lowGpsCount: number;
+  gpsUnavailableCount: number;
   routeStatus: string;
 }
 
@@ -49,8 +55,13 @@ export interface ReportTotals {
   doneInRoute: number;
   doneOutOfRoute: number;
   doneTotal: number;
+  pendingReports: number;
+  rejectedReports: number;
   doneStops: number;
   kpiTarget: number;
+  reviewCount: number;
+  lowGpsCount: number;
+  gpsUnavailableCount: number;
 }
 
 export function buildReportRows(filters: { dateFrom?: string; dateTo?: string; machineId?: string }): ReportRow[] {
@@ -98,8 +109,11 @@ export function buildReportRows(filters: { dateFrom?: string; dateTo?: string; m
       // схлопывал их все в одну запись. Именно это давало расхождение с
       // ручным подсчётом по сообщениям в Telegram-группе (там считают
       // каждое сообщение/фото, а не уникальный банкомат).
-      const doneInRoute = todaysCrewReports.filter((r) => routeAtmIds.has(r.atmId)).length;
-      const doneOutOfRoute = todaysCrewReports.filter((r) => !routeAtmIds.has(r.atmId)).length;
+      const approvedReports = todaysCrewReports.filter((r) => r.approvalStatus === "approved");
+      const pendingReports = todaysCrewReports.filter((r) => !r.approvalStatus || r.approvalStatus === "pending").length;
+      const rejectedReports = todaysCrewReports.filter((r) => r.approvalStatus === "rejected").length;
+      const doneInRoute = approvedReports.filter((r) => routeAtmIds.has(r.atmId)).length;
+      const doneOutOfRoute = approvedReports.filter((r) => !routeAtmIds.has(r.atmId)).length;
 
       const plannedAtms = route?.atmIds.length ?? 0;
       const doneTotal = doneInRoute + doneOutOfRoute;
@@ -108,12 +122,14 @@ export function buildReportRows(filters: { dateFrom?: string; dateTo?: string; m
       // по близости (≤30м), как и при построении маршрута. Банкоматы, для
       // которых нет записи в базе (atmId пуст — старые отчёты "вне базы"),
       // считаются каждый отдельной точкой — их не с чем группировать.
-      const cleanedAtmIds = new Set(todaysCrewReports.map((r) => r.atmId).filter(Boolean));
+      const cleanedAtmIds = new Set(approvedReports.map((r) => r.atmId).filter(Boolean));
       const cleanedAtmObjects = Array.from(cleanedAtmIds)
         .map((id) => getAtmById(id))
         .filter((a): a is NonNullable<typeof a> => Boolean(a));
-      const reportsWithoutAtm = todaysCrewReports.filter((r) => !r.atmId).length;
+      const reportsWithoutAtm = approvedReports.filter((r) => !r.atmId).length;
       const doneStops = countDistinctPoints(cleanedAtmObjects, 30) + reportsWithoutAtm;
+
+      const quality = summarizeReportQuality(todaysCrewReports);
 
       return {
         date: e.date,
@@ -124,11 +140,18 @@ export function buildReportRows(filters: { dateFrom?: string; dateTo?: string; m
         doneInRoute,
         doneOutOfRoute,
         doneTotal,
+        pendingReports,
+        rejectedReports,
         doneStops,
         // % считаем от KPI по ТОЧКАМ, не по числу банкоматов — норма
         // "50 в день" это 50 точек, а не 50 отдельных устройств.
         donePct: e.kpiTarget > 0 ? Math.round((doneStops / e.kpiTarget) * 100) : 0,
         excludedCount: route?.excludedCount ?? 0,
+        // SUBMITTED/APPROVED workflow is not present in the current cleaning report model.
+        // Surface antifraud/GPS review signals separately; never label these as approved KPI.
+        reviewCount: quality.reviewCount,
+        lowGpsCount: quality.lowGpsCount,
+        gpsUnavailableCount: quality.gpsUnavailableCount,
         routeStatus: route?.status ?? "Маршрут не построен",
       };
     })
@@ -143,9 +166,14 @@ export function buildReportTotals(rows: ReportRow[]): ReportTotals {
       doneInRoute: acc.doneInRoute + r.doneInRoute,
       doneOutOfRoute: acc.doneOutOfRoute + r.doneOutOfRoute,
       doneTotal: acc.doneTotal + r.doneTotal,
+      pendingReports: acc.pendingReports + r.pendingReports,
+      rejectedReports: acc.rejectedReports + r.rejectedReports,
       doneStops: acc.doneStops + r.doneStops,
       kpiTarget: acc.kpiTarget + r.kpiTarget,
+      reviewCount: acc.reviewCount + r.reviewCount,
+      lowGpsCount: acc.lowGpsCount + r.lowGpsCount,
+      gpsUnavailableCount: acc.gpsUnavailableCount + r.gpsUnavailableCount,
     }),
-    { plannedAtms: 0, doneInRoute: 0, doneOutOfRoute: 0, doneTotal: 0, doneStops: 0, kpiTarget: 0 }
+    { plannedAtms: 0, doneInRoute: 0, doneOutOfRoute: 0, doneTotal: 0, pendingReports: 0, rejectedReports: 0, doneStops: 0, kpiTarget: 0, reviewCount: 0, lowGpsCount: 0, gpsUnavailableCount: 0 }
   );
 }

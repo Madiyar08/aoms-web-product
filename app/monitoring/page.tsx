@@ -4,9 +4,14 @@ import { listEmployees } from "@/lib/employees";
 import { listSchedule } from "@/lib/schedule";
 import { listCleaningReports } from "@/lib/cleaning-reports";
 import { listAtmIssues } from "@/lib/atm-issues";
+import { listAtms } from "@/lib/atms";
+import { countActualDistrictCompletions } from "@/lib/monitoring-metrics";
 import { todayTashkent, formatTashkentDateTime } from "@/lib/tz";
 import MonitoringAutoRefresh from "./MonitoringAutoRefresh";
 import MonitoringFullscreenButton from "./MonitoringFullscreenButton";
+import MonitoringMap from "./MonitoringMap";
+import { listDistrictBoundaries } from "@/lib/district-boundaries";
+import { regionIdForName } from "@/lib/geography";
 
 export const dynamic = "force-dynamic";
 
@@ -56,9 +61,10 @@ function Metric({ icon, label, value, detail, tone = "blue" }: { icon: string; l
   </div>;
 }
 
-export default async function MonitoringPage() {
+export default async function MonitoringPage({ searchParams }: { searchParams?: { region?: string; district?: string } }) {
   const today = todayTashkent();
   const machines = listMachines();
+  const atms = listAtms();
   const employees = listEmployees();
   const scheduleToday = listSchedule().filter((item) => item.date === today);
   const allReports = listCleaningReports();
@@ -67,12 +73,33 @@ export default async function MonitoringPage() {
     return date && !Number.isNaN(new Date(date).getTime()) &&
       new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Tashkent", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(date)) === today;
   });
+  const regionOptions = [...new Set(atms.map((atm) => (atm.region || "").trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b, "ru"));
+  const districtOptions = [...new Set(atms.filter((atm) => !searchParams?.region || atm.region === searchParams.region).map((atm) => (atm.district || "").trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b, "ru"));
+  const selectedRegion = regionOptions.includes(searchParams?.region || "") ? (searchParams?.region || "") : "";
+  const selectedDistrict = districtOptions.includes(searchParams?.district || "") ? (searchParams?.district || "") : "";
+  const atmById = new Map(atms.map((atm) => [atm.id, atm]));
+  const hasGeoFilter = Boolean(selectedRegion || selectedDistrict);
+  const visibleReports = todayReports.filter((report) => {
+    if (!hasGeoFilter) return true;
+    const atm = atmById.get(report.atmId);
+    if (selectedRegion && atm?.region !== selectedRegion) return false;
+    if (selectedDistrict && atm?.district !== selectedDistrict) return false;
+    return true;
+  });
+
   const issues = listAtmIssues().filter((issue) => {
     const date = issue.createdAt;
     return Boolean(date && !Number.isNaN(new Date(date).getTime()) &&
       new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Tashkent", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(date)) === today);
   });
-  const openIssues = issues.filter((issue) => issue.status !== "Разобран");
+  const visibleIssues = issues.filter((issue) => {
+    if (!hasGeoFilter) return true;
+    const atm = atmById.get(issue.atmId);
+    if (selectedRegion && atm?.region !== selectedRegion) return false;
+    if (selectedDistrict && atm?.district !== selectedDistrict) return false;
+    return true;
+  });
+  const openIssues = visibleIssues.filter((issue) => issue.status !== "Разобран");
   const machineById = new Map(machines.map((machine) => [machine.id, machine]));
   const employeeById = new Map(employees.map((employee) => [employee.id, employee]));
   const reportsByMachine = new Map<string, typeof todayReports>();
@@ -89,9 +116,22 @@ export default async function MonitoringPage() {
     reportsByMachine.set(machineId, list);
   }
 
+  const reportsForCrew = new Map<string, typeof visibleReports>();
+  for (const report of visibleReports) {
+    let machineId = report.machineId;
+    if (!machineId) {
+      const employeeMachine = machines.find((machine) => machine.employee1Id === report.employeeId || machine.employee2Id === report.employeeId);
+      machineId = employeeMachine?.id ?? "";
+    }
+    if (!machineId) continue;
+    const list = reportsForCrew.get(machineId) ?? [];
+    list.push(report);
+    reportsForCrew.set(machineId, list);
+  }
+
   const crewRows = scheduleToday.map((schedule) => {
     const machine = machineById.get(schedule.machineId);
-    const crewReports = reportsByMachine.get(schedule.machineId) ?? [];
+    const crewReports = hasGeoFilter ? (reportsForCrew.get(schedule.machineId) ?? []) : (reportsByMachine.get(schedule.machineId) ?? []);
     const cleaned = new Set(crewReports.map((report) => report.atmId).filter((id) => Boolean(id && id.trim()))).size;
     const lastReport = [...crewReports].sort((a, b) => timeValue(b.createdAt) - timeValue(a.createdAt))[0];
     const lastActivity = timeValue(lastReport?.createdAt);
@@ -110,15 +150,42 @@ export default async function MonitoringPage() {
   });
 
 
-  const totalPlan = crewRows.reduce((sum, row) => sum + Math.max(0, row.schedule.kpiTarget || 0), 0);
-  const totalCleaned = new Set(todayReports.map((report) => report.atmId).filter((id) => Boolean(id && id.trim()))).size;
+  const visibleCrewRows = hasGeoFilter ? crewRows.filter((row) => row.cleaned > 0) : crewRows;
+  const totalPlan = visibleCrewRows.reduce((sum, row) => sum + Math.max(0, row.schedule.kpiTarget || 0), 0);
+  const totalCleaned = new Set(visibleReports.map((report) => report.atmId).filter((id) => Boolean(id && id.trim()))).size;
   const completion = totalPlan > 0 ? Math.round((totalCleaned / totalPlan) * 100) : 0;
-  const activeCount = crewRows.filter((row) => row.cleaned > 0 && row.cleaned < row.schedule.kpiTarget).length;
-  const latestReports = [...todayReports].sort((a, b) => timeValue(b.createdAt) - timeValue(a.createdAt)).slice(0, 10);
-  const districtNames = [...new Set(scheduleToday.flatMap((item) => item.districts))].sort();
+  const activeCount = visibleCrewRows.filter((row) => row.cleaned > 0 && row.cleaned < row.schedule.kpiTarget).length;
+  const latestReports = [...visibleReports].sort((a, b) => timeValue(b.createdAt) - timeValue(a.createdAt)).slice(0, 10);
+  const districtCompletions = countActualDistrictCompletions(visibleReports, atms).filter((item) => (!selectedRegion || item.region === selectedRegion) && (!selectedDistrict || item.district === selectedDistrict));
   const validReportTimes = [...allReports].map((report) => timeValue(report.createdAt)).filter(Boolean).sort((a, b) => b - a);
   const intervals = validReportTimes.slice(0, 30).slice(0, -1).map((value, index) => value - validReportTimes[index + 1]).filter((value) => value > 0 && value < 24 * 60 * 60000);
   const averageIntervalMinutes = intervals.length ? Math.round(intervals.reduce((sum, value) => sum + value, 0) / intervals.length / 60000) : null;
+
+  const reportCountByAtm = new Map<string, number>();
+  for (const report of visibleReports) {
+    if (!report.atmId) continue;
+    reportCountByAtm.set(report.atmId, (reportCountByAtm.get(report.atmId) || 0) + 1);
+  }
+  const openIssueAtmIds = new Set(visibleIssues.filter((issue) => issue.status !== "Разобран" && issue.atmId).map((issue) => issue.atmId));
+  const mapPoints = atms.filter((atm) => {
+    if (selectedRegion && atm.region !== selectedRegion) return false;
+    if (selectedDistrict && atm.district !== selectedDistrict) return false;
+    return true;
+  }).flatMap((atm) => {
+    const lat = Number(atm.latitude);
+    const lon = Number(atm.longitude);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon) || lat < 35 || lat > 47 || lon < 54 || lon > 75) return [];
+    return [{ id: atm.id, code: atm.code || "без ID", name: atm.name || "", address: atm.address || "", lat, lon,
+      reportsToday: reportCountByAtm.get(atm.id) || 0, hasOpenIssue: openIssueAtmIds.has(atm.id) }];
+  });
+  const selectedRegionId = selectedRegion ? regionIdForName(selectedRegion) : "";
+  const mapBoundaries = listDistrictBoundaries().filter((boundary) => {
+    if (selectedRegionId && boundary.regionId !== selectedRegionId) return false;
+    if (selectedDistrict && boundary.district !== selectedDistrict) return false;
+    return boundary.points.length >= 3;
+  }).map((boundary) => ({ id: boundary.id, district: boundary.district,
+    region: regionOptions.find((name) => regionIdForName(name) === boundary.regionId) || selectedRegion || "Регион не указан",
+    points: boundary.points }));
 
   return <div id="monitoring-fullscreen" className="monitoring-fullscreen mx-auto max-w-[1800px]">
     <header className="mb-6 flex flex-wrap items-end justify-between gap-4">
@@ -135,27 +202,41 @@ export default async function MonitoringPage() {
       </div>
     </header>
 
+    <form method="get" className="mb-5 flex flex-wrap items-end gap-3 rounded-xl border border-line bg-white p-4 shadow-sm">
+      <div className="mr-auto min-w-[180px]"><p className="text-xs font-semibold text-ink">Географический фильтр</p><p className="mt-1 text-[11px] text-neutral-500">Сводки и отчёты фильтруются по фактическому адресу ATM</p></div>
+      <label className="grid gap-1 text-[11px] font-medium text-neutral-500">Регион
+        <select name="region" defaultValue={selectedRegion} className="min-w-[190px] rounded-lg border border-line bg-white px-3 py-2 text-xs text-ink"><option value="">Все регионы</option>{regionOptions.map((region) => <option key={region} value={region}>{region}</option>)}</select>
+      </label>
+      <label className="grid gap-1 text-[11px] font-medium text-neutral-500">Район
+        <select name="district" defaultValue={selectedDistrict} className="min-w-[190px] rounded-lg border border-line bg-white px-3 py-2 text-xs text-ink"><option value="">Все районы</option>{districtOptions.map((district) => <option key={district} value={district}>{district}</option>)}</select>
+      </label>
+      <button type="submit" className="rounded-lg bg-ink px-4 py-2 text-xs font-semibold text-white">Применить</button>
+      {hasGeoFilter && <Link href="/monitoring" className="rounded-lg border border-line px-4 py-2 text-xs font-medium text-neutral-600 hover:bg-slate-50">Сбросить</Link>}
+    </form>
+
     <section className="mb-6 grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-5">
       <Metric icon="🚚" label="Экипажи по расписанию" value={crewRows.length} detail={`${activeCount} с отчётами в работе`} />
       <Metric icon="▣" label="План на сегодня" value={totalPlan} detail="Точек KPI по расписанию" tone="purple" />
-      <Metric icon="✓" label="Отчёты сегодня" value={totalCleaned} detail={`${completion}% от суммарного KPI`} tone="green" />
+      <Metric icon="✓" label="Уникальные банкоматы" value={totalCleaned} detail={`${completion}% от суммарного KPI экипажей`} tone="green" />
       <Metric icon="◷" label="Средний интервал отчётов" value={averageIntervalMinutes === null ? "—" : `${averageIntervalMinutes} мин.`} detail="Между последними 30 отчётами" tone="orange" />
       <Metric icon="⚠" label="Открытые проблемы" value={openIssues.length} detail="Зарегистрированы и не разобраны" tone={openIssues.length ? "red" : "green"} />
     </section>
 
+    <section className="mb-6"><MonitoringMap points={mapPoints} boundaries={mapBoundaries} /></section>
+
     <div className="grid grid-cols-1 items-start gap-5 2xl:grid-cols-[minmax(0,1fr)_360px]">
       <section className="min-w-0 overflow-hidden rounded-xl border border-line bg-white shadow-sm">
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line p-5">
-          <div><h2 className="font-semibold text-ink">Экипажи и последняя активность</h2><p className="mt-1 text-xs text-neutral-400">Последнее фактическое сообщение экипажа</p></div>
-          <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs text-slate-600">{crewRows.length} экипажей</span>
+          <div><h2 className="font-semibold text-ink">Экипажи и последняя активность</h2><p className="mt-1 text-xs text-neutral-400">Последнее фактическое сообщение экипажа{hasGeoFilter ? " · экипажи с отчётами в выбранной географии" : ""}</p></div>
+          <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs text-slate-600">{visibleCrewRows.length} экипажей</span>
         </div>
-        {crewRows.length === 0 ? <div className="p-10 text-center text-sm text-neutral-400">На сегодня нет экипажей по расписанию.</div> : <div className="overflow-x-auto">
+        {visibleCrewRows.length === 0 ? <div className="p-10 text-center text-sm text-neutral-400">На сегодня нет экипажей по расписанию.</div> : <div className="overflow-x-auto">
           <table className="w-full min-w-[1060px] text-left text-[12px]">
             <thead className="bg-slate-50 text-[10px] uppercase tracking-wide text-neutral-500"><tr>
               <th className="px-4 py-3">Машина</th><th className="px-4 py-3">Экипаж</th><th className="px-4 py-3">Район</th><th className="px-4 py-3">План</th><th className="px-4 py-3">Уникальные ID</th><th className="px-4 py-3">Выполнение</th><th className="px-4 py-3">Статус</th><th className="px-4 py-3">Последний отчёт</th>
             </tr></thead>
             <tbody className="divide-y divide-line">
-              {crewRows.map((row) => {
+              {visibleCrewRows.map((row) => {
                 const pct = row.schedule.kpiTarget > 0 ? Math.min(100, Math.round(row.cleaned / row.schedule.kpiTarget * 100)) : 0;
                 return <tr key={row.schedule.id} className="hover:bg-slate-50/80">
                   <td className="px-4 py-4"><span className="rounded-md bg-blue-50 px-2 py-1 font-semibold text-blue-800">{row.machine?.number || "—"}</span></td>
@@ -174,7 +255,7 @@ export default async function MonitoringPage() {
       </section>
 
       <section className="overflow-hidden rounded-xl border border-line bg-white shadow-sm">
-        <div className="flex items-center justify-between border-b border-line p-5"><div><h2 className="font-semibold text-ink">Последние 10 отчётов</h2><p className="mt-1 text-xs text-neutral-400">Новые отчёты отображаются сверху</p></div><span className="rounded-full bg-blue-50 px-2.5 py-1 text-xs font-semibold text-blue-700">{latestReports.length}</span></div>
+        <div className="flex items-center justify-between border-b border-line p-5"><div><h2 className="font-semibold text-ink">Последние 10 отчётов</h2><p className="mt-1 text-xs text-neutral-400">Новые отчёты отображаются сверху · {visibleReports.length} за сегодня в выборке</p></div><span className="rounded-full bg-blue-50 px-2.5 py-1 text-xs font-semibold text-blue-700">{latestReports.length}</span></div>
         {latestReports.length === 0 ? <p className="p-6 text-sm text-neutral-400">Отчётов пока нет.</p> : <div className="divide-y divide-line">
           {latestReports.map((report) => {
             const machine = machineById.get(report.machineId);
@@ -193,18 +274,14 @@ export default async function MonitoringPage() {
     </div>
 
     <section className="mt-5 grid grid-cols-1 gap-5 lg:grid-cols-2">
-      <div className="rounded-xl border border-line bg-white p-5 shadow-sm"><div className="flex items-center justify-between"><div><h2 className="font-semibold text-ink">Выполнение по районам</h2><p className="mt-1 text-xs text-neutral-400">По расписанию и отчётам за сегодня</p></div><Link href="/reports" className="text-xs text-route hover:underline">Детали →</Link></div>
-        {districtNames.length === 0 ? <p className="mt-5 text-sm text-neutral-400">Расписание на сегодня не найдено.</p> : <div className="mt-5 space-y-4">{districtNames.map((district) => {
-          const rows = crewRows.filter((row) => row.schedule.districts.includes(district));
-          const plan = rows.reduce((sum, row) => sum + Math.max(0, row.schedule.kpiTarget), 0);
-          const done = rows.reduce((sum, row) => sum + row.cleaned, 0);
-          const pct = plan > 0 ? Math.round(done / plan * 100) : 0;
-          return <div key={district}><div className="mb-2 flex items-center justify-between gap-3 text-xs"><span className="text-neutral-600">{district}</span><span className="font-mono font-semibold text-ink">{done} / {plan} · {pct}%</span></div><div className="h-2 overflow-hidden rounded-full bg-slate-100"><div className="h-full rounded-full bg-emerald-500" style={{ width: `${Math.min(100, pct)}%` }} /></div></div>;
-        })}</div>}
+      <div className="rounded-xl border border-line bg-white p-5 shadow-sm"><div className="flex items-center justify-between"><div><h2 className="font-semibold text-ink">Выполнение по районам</h2><p className="mt-1 text-xs text-neutral-400">По фактическому району банкомата из справочника</p></div><Link href="/reports" className="text-xs text-route hover:underline">Детали →</Link></div>
+        {districtCompletions.length === 0 ? <p className="mt-5 text-sm text-neutral-400">Сегодня ещё нет отчётов с ID банкоматов.</p> : <div className="mt-5 space-y-4">{districtCompletions.map((item) => (
+          <div key={item.key} className="flex items-center justify-between gap-3 rounded-lg bg-slate-50 px-3 py-2 text-xs"><span className="min-w-0 text-neutral-600">{item.region} · {item.district}</span><span className="shrink-0 font-mono font-semibold text-ink">{item.cleaned} шт.</span></div>
+        ))}</div>}
       </div>
-      <div className="rounded-xl border border-line bg-white p-5 shadow-sm"><div className="flex items-center justify-between"><div><h2 className="font-semibold text-ink">Требуют внимания</h2><p className="mt-1 text-xs text-neutral-400">Открытые проблемы и неактивные экипажи</p></div><Badge tone={openIssues.length ? "red" : "green"}>{openIssues.length} проблем</Badge></div>
-        <div className="mt-4 space-y-3">{crewRows.filter((row) => row.state === "Нет свежих данных" || row.state === "Не начал").slice(0, 5).map((row) => <div key={row.schedule.id} className="flex items-start justify-between gap-3 rounded-lg bg-slate-50 p-3"><div><p className="text-xs font-semibold text-ink">Машина {row.machine?.number || "—"}</p><p className="mt-1 text-[11px] text-neutral-500">{row.schedule.districts.join(", ")} · {row.driver?.fullName || "Водитель не назначен"}</p></div><Badge tone={row.state === "Нет свежих данных" ? "orange" : "gray"}>{row.state}</Badge></div>)}
-          {crewRows.every((row) => row.state !== "Нет свежих данных" && row.state !== "Не начал") && <p className="rounded-lg bg-emerald-50 p-3 text-xs text-emerald-700">По активности экипажей предупреждений нет.</p>}
+      <div className="rounded-xl border border-line bg-white p-5 shadow-sm"><div className="flex items-center justify-between"><div><h2 className="font-semibold text-ink">Требуют внимания</h2><p className="mt-1 text-xs text-neutral-400">Открытые проблемы и неактивные экипажи{hasGeoFilter ? " · выбранная география" : ""}</p></div><Badge tone={openIssues.length ? "red" : "green"}>{openIssues.length} проблем</Badge></div>
+        <div className="mt-4 space-y-3">{visibleCrewRows.filter((row) => row.state === "Нет свежих данных" || row.state === "Не начал").slice(0, 5).map((row) => <div key={row.schedule.id} className="flex items-start justify-between gap-3 rounded-lg bg-slate-50 p-3"><div><p className="text-xs font-semibold text-ink">Машина {row.machine?.number || "—"}</p><p className="mt-1 text-[11px] text-neutral-500">{row.schedule.districts.join(", ")} · {row.driver?.fullName || "Водитель не назначен"}</p></div><Badge tone={row.state === "Нет свежих данных" ? "orange" : "gray"}>{row.state}</Badge></div>)}
+          {visibleCrewRows.every((row) => row.state !== "Нет свежих данных" && row.state !== "Не начал") && <p className="rounded-lg bg-emerald-50 p-3 text-xs text-emerald-700">По активности экипажей предупреждений нет.</p>}
           <Link href="/atm-issues" className="flex items-center justify-between rounded-lg border border-line p-3 text-xs hover:bg-slate-50"><span>Открытые проблемы банкоматов</span><strong>{openIssues.length} →</strong></Link>
         </div>
       </div>

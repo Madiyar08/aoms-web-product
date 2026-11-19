@@ -1,28 +1,25 @@
 /**
- * Точка входа, которую Next.js выполняет один раз при старте сервера
- * (см. instrumentationHook в next.config.mjs).
+ * Background delivery worker bootstrap.
  *
- * Здесь ставим глобальные страховочные обработчики. Без них одна
- * незахваченная ошибка в асинхронном коде (например, сбой сети при
- * фоновой отправке фото в Telegram, обрыв соединения клиентом и т.п.)
- * может в Node уронить весь процесс — Railway увидит падение и
- * перезапустит контейнер (SIGTERM / Stopping Container в логах).
- *
- * Мы такие ошибки логируем, но процесс не роняем: HTTP-запросы,
- * которые клиент оборвал (ECONNRESET/"aborted"), — это нормальная
- * ситуация в мобильном приложении, а не повод перезапускать сервер.
+ * We deliberately do not install a process-wide `uncaughtException` handler:
+ * swallowing an unknown fatal exception can leave the server in an undefined
+ * state while Railway still considers the process healthy. Expected network
+ * errors must be caught at the operation that can recover from them.
  */
+const workerGlobal = globalThis as typeof globalThis & { __aomsDeliveryWorkerStarted?: boolean };
+
 export async function register() {
-  if (process.env.NEXT_RUNTIME === "nodejs") {
-    process.on("unhandledRejection", (reason) => {
-      console.error("[unhandledRejection]", reason);
-    });
-    process.on("uncaughtException", (err: Error & { code?: string }) => {
-      // Обрыв соединения клиентом — ожидаемо, не логируем как критичное
-      if (err?.code === "ECONNRESET" || err?.message === "aborted") {
-        return;
-      }
-      console.error("[uncaughtException]", err);
-    });
-  }
+  if (process.env.NEXT_RUNTIME !== "nodejs") return;
+  if (workerGlobal.__aomsDeliveryWorkerStarted) return;
+
+  workerGlobal.__aomsDeliveryWorkerStarted = true;
+  const timer = setInterval(() => {
+    void Promise.all([
+      import("./lib/delivery-queue").then(({ processDeliveryQueueBatch }) => processDeliveryQueueBatch(3)),
+      import("./lib/inspector-media-queue").then(({ processInspectorMediaQueueBatch }) => processInspectorMediaQueueBatch(2)),
+    ]).catch((error) => console.error("[aoms-queue] worker tick failed", error));
+  }, 3000);
+
+  // Do not keep the process alive solely for this timer.
+  (timer as unknown as { unref?: () => void }).unref?.();
 }

@@ -1,6 +1,6 @@
-import crypto from "node:crypto";
 import { haversineMeters } from "./coordinate-analysis";
 import { getSettingValue } from "./settings";
+export { validateTelegramInitData, validateTelegramWebhookSecret, TELEGRAM_INIT_DATA_MAX_AGE_SECONDS, TELEGRAM_INIT_DATA_FUTURE_SKEW_SECONDS } from "./telegram-auth-core";
 
 /**
  * Проверяет подпись initData из Telegram Mini App — это то, что позволяет
@@ -10,37 +10,6 @@ import { getSettingValue } from "./settings";
  *
  * Документация: https://core.telegram.org/bots/webapps#validating-data-received-via-the-mini-app
  */
-export function validateTelegramInitData(initData: string): { valid: boolean; userId?: string } {
-  const token = process.env.TELEGRAM_BOT_TOKEN;
-  if (!token) return { valid: false };
-
-  const params = new URLSearchParams(initData);
-  const hash = params.get("hash");
-  if (!hash) return { valid: false };
-
-  params.delete("hash");
-  const dataCheckString = Array.from(params.entries())
-    .map(([k, v]) => `${k}=${v}`)
-    .sort()
-    .join("\n");
-
-  const secretKey = crypto.createHmac("sha256", "WebAppData").update(token).digest();
-  const computedHash = crypto.createHmac("sha256", secretKey).update(dataCheckString).digest("hex");
-
-  if (computedHash !== hash) return { valid: false };
-
-  // Достаём user.id из подтверждённых данных
-  try {
-    const userJson = params.get("user");
-    if (userJson) {
-      const user = JSON.parse(userJson) as { id: number };
-      return { valid: true, userId: String(user.id) };
-    }
-  } catch {
-    // ignore
-  }
-  return { valid: true };
-}
 
 export interface AntifraudInput {
   atmLat: number;
@@ -50,6 +19,7 @@ export interface AntifraudInput {
   hasPhoto: boolean;
   photoFromCamera: boolean; // клиент сообщает, что фото сделано камерой, а не выбрано из галереи
   inRoute: boolean;
+  gpsAccuracy?: number;
 }
 
 export interface AntifraudResult {
@@ -83,6 +53,9 @@ export function runAntifraudChecks(input: AntifraudInput): AntifraudResult {
     haversineMeters(input.atmLat, input.atmLon, input.gpsLat, input.gpsLon)
   );
 
+  if (Number.isFinite(input.gpsAccuracy) && Number(input.gpsAccuracy) > 50) {
+    flags.push(`Низкая точность GPS: ${Math.round(Number(input.gpsAccuracy))} м (измерение требует проверки)`);
+  }
   if (!input.hasPhoto) flags.push("Нет фотографии");
   if (!input.photoFromCamera) flags.push("Фото не с камеры (возможно, из галереи)");
   if (Number.isNaN(distanceMeters)) {

@@ -10,6 +10,9 @@ export interface Atm extends BaseEntity {
   name: string;
   address: string;
   district: string;
+  /** Region is optional for backwards compatibility with legacy ATM rows. */
+  region?: string;
+  regionId?: string;
   latitude: string;
   longitude: string;
   categoryId: string;

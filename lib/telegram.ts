@@ -280,6 +280,35 @@ export async function sendPhotoToArchive(
   }
 }
 
+
+/** Загружает видео инспекторского отчёта в Telegram-архив и возвращает file_id. */
+export async function sendVideoToArchive(
+  buffer: Buffer,
+  mime: string,
+  caption: string,
+  filename = "inspector-video.mp4"
+): Promise<{ fileId: string; messageId: number } | null> {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  const channelId = process.env.TELEGRAM_ARCHIVE_CHANNEL_ID;
+  if (!token || !channelId) return null;
+  try {
+    const form = new FormData();
+    form.append("chat_id", channelId);
+    form.append("caption", caption.slice(0, 900));
+    form.append("video", new Blob([new Uint8Array(buffer)], { type: mime }), filename);
+    const response = await fetch(`${TELEGRAM_API}/bot${token}/sendVideo`, { method: "POST", body: form });
+    const data = (await response.json()) as { ok: boolean; result?: { message_id: number; video?: { file_id: string } }; description?: string };
+    if (!data.ok || !data.result?.video?.file_id) {
+      console.error("[telegram] Архивация видео не удалась:", data.description);
+      return null;
+    }
+    return { fileId: data.result.video.file_id, messageId: data.result.message_id };
+  } catch (error) {
+    console.error("[telegram] Ошибка архивации видео:", error);
+    return null;
+  }
+}
+
 /**
  * Скачивает содержимое файла из Telegram по file_id — используется при
  * открытии фото из Dashboard (роут /api/photos/[filename], когда имя

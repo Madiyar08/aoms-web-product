@@ -1,10 +1,16 @@
 "use server";
 
+import { requireAdminPermission } from "@/lib/access-control";
+
 import { createAtm, deleteAtm, deleteAllAtms, findAtmByCode, updateAtm, getAtmById } from "@/lib/atms";
 import { listCategories } from "@/lib/categories";
 import { createStatusExclusionChecker } from "@/lib/routing-rules";
 import { rebuildRoutesContainingAtm } from "@/lib/routes";
 import { revalidatePath } from "next/cache";
+import { resolveRegionName, regionIdForName } from "@/lib/geography";
+import { appendAuditEvent } from "@/lib/audit-log";
+import { currentAdminActor } from "@/lib/access-control";
+import { withTransaction } from "@/lib/db";
 
 /**
  * После смены категории/статуса банкомата — если новое значение теперь
@@ -25,23 +31,33 @@ async function rebuildIfNowExcluded(atmId: string) {
 }
 
 export async function deleteAllAtmsAction() {
-  const count = deleteAllAtms();
+  requireAdminPermission("atms:write");
+  const count = withTransaction(() => {
+    const deleted = deleteAllAtms();
+    const actor = currentAdminActor();
+    if (actor && deleted > 0) appendAuditEvent({ actorId: actor.actorId, actorLabel: actor.actorLabel, actorRole: actor.role, action: "atm.bulk_deleted", entityType: "atm", entityId: "all", detailsJson: JSON.stringify({ count: deleted }) });
+    return deleted;
+  });
   revalidatePath("/atms");
   revalidatePath("/");
   return count;
 }
 
 export async function createAtmAction(formData: FormData) {
+  requireAdminPermission("atms:write");
   const code = String(formData.get("code") || "").trim();
   const name = String(formData.get("name") || "").trim();
   if (!name) return;
   if (code && findAtmByCode(code)) return;
 
-  createAtm({
+  withTransaction(() => {
+    const atm = createAtm({
     code,
     name,
     address: String(formData.get("address") || ""),
     district: String(formData.get("district") || ""),
+    region: resolveRegionName(String(formData.get("region") || "")),
+    regionId: regionIdForName(String(formData.get("region") || "")),
     latitude: String(formData.get("latitude") || ""),
     longitude: String(formData.get("longitude") || ""),
     categoryId: String(formData.get("categoryId") || ""),
@@ -50,11 +66,16 @@ export async function createAtmAction(formData: FormData) {
     coordsVerified: formData.get("coordsVerified") === "on",
     comments: String(formData.get("comments") || ""),
     source: "Ручной ввод",
+    });
+    const actor = currentAdminActor();
+    if (actor) appendAuditEvent({ actorId: actor.actorId, actorLabel: actor.actorLabel, actorRole: actor.role, action: "atm.created", entityType: "atm", entityId: atm.id, detailsJson: JSON.stringify({ code: atm.code, fields: ["code", "name", "address", "district", "region", "coordinates", "categoryId", "workStatusId"] }) });
+    return atm;
   });
   revalidatePath("/atms");
 }
 
 export async function updateAtmAction(id: string, formData: FormData) {
+  requireAdminPermission("atms:write");
   const code = String(formData.get("code") || "").trim();
   const name = String(formData.get("name") || "").trim();
   if (!name) return;
@@ -64,11 +85,13 @@ export async function updateAtmAction(id: string, formData: FormData) {
     if (existing && existing.id !== id) return; // ID занят другим банкоматом
   }
 
-  updateAtm(id, {
+  const patch = {
     code,
     name,
     address: String(formData.get("address") || ""),
     district: String(formData.get("district") || ""),
+    region: resolveRegionName(String(formData.get("region") || "")),
+    regionId: regionIdForName(String(formData.get("region") || "")),
     latitude: String(formData.get("latitude") || ""),
     longitude: String(formData.get("longitude") || ""),
     categoryId: String(formData.get("categoryId") || ""),
@@ -76,14 +99,30 @@ export async function updateAtmAction(id: string, formData: FormData) {
     addressVerified: formData.get("addressVerified") === "on",
     coordsVerified: formData.get("coordsVerified") === "on",
     comments: String(formData.get("comments") || ""),
+  };
+  const updated = withTransaction(() => {
+    const before = getAtmById(id);
+    const ok = updateAtm(id, patch);
+    const changedFields = before ? Object.keys(patch).filter((key) => String((before as any)[key] ?? "") !== String((patch as any)[key] ?? "")) : [];
+    const actor = currentAdminActor();
+    if (ok && actor && changedFields.length) appendAuditEvent({ actorId: actor.actorId, actorLabel: actor.actorLabel, actorRole: actor.role, action: "atm.updated", entityType: "atm", entityId: id, detailsJson: JSON.stringify({ code, changedFields }) });
+    return ok;
   });
+  if (!updated) return;
   await rebuildIfNowExcluded(id);
   revalidatePath("/atms");
   revalidatePath(`/atms/${id}`);
 }
 
 export async function deleteAtmAction(id: string) {
-  deleteAtm(id);
+  requireAdminPermission("atms:write");
+  withTransaction(() => {
+    const existed = getAtmById(id);
+    if (!existed) return;
+    deleteAtm(id);
+    const actor = currentAdminActor();
+    if (actor) appendAuditEvent({ actorId: actor.actorId, actorLabel: actor.actorLabel, actorRole: actor.role, action: "atm.deleted", entityType: "atm", entityId: id, detailsJson: JSON.stringify({ code: existed.code }) });
+  });
   revalidatePath("/atms");
 }
 
@@ -93,14 +132,19 @@ export async function deleteAtmAction(id: string) {
  * категорию, не трогая статус, и наоборот.
  */
 export async function bulkAssignAction(ids: string[], categoryId: string, workStatusId: string) {
+  requireAdminPermission("atms:write");
   const patch: { categoryId?: string; workStatusId?: string } = {};
   if (categoryId) patch.categoryId = categoryId;
   if (workStatusId) patch.workStatusId = workStatusId;
   if (Object.keys(patch).length === 0) return;
 
-  for (const id of ids) {
-    updateAtm(id, patch);
-    await rebuildIfNowExcluded(id);
-  }
+  const changedIds = withTransaction(() => {
+    const changed: string[] = [];
+    for (const id of ids) if (updateAtm(id, patch)) changed.push(id);
+    const actor = currentAdminActor();
+    if (actor && changed.length) appendAuditEvent({ actorId: actor.actorId, actorLabel: actor.actorLabel, actorRole: actor.role, action: "atm.bulk_updated", entityType: "atm", entityId: "bulk", detailsJson: JSON.stringify({ count: changed.length, fields: Object.keys(patch) }) });
+    return changed;
+  });
+  for (const id of changedIds) await rebuildIfNowExcluded(id);
   revalidatePath("/atms");
 }

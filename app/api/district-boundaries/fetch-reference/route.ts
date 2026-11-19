@@ -13,12 +13,13 @@ import { NextRequest, NextResponse } from "next/server";
  * ошибку, и останется прежний способ (вручную или через центр).
  */
 export async function POST(req: NextRequest) {
-  const { district } = await req.json();
+  const { district, region } = await req.json();
   if (!district) {
     return NextResponse.json({ ok: false, error: "Не указан район" }, { status: 400 });
   }
 
-  const query = `${district}, Ташкент, Узбекистан`;
+  const regionLabel = typeof region === "string" && region.trim() ? region.trim() : "Узбекистан";
+  const query = `${district}, ${regionLabel}, Узбекистан`;
   const url = `https://nominatim.openstreetmap.org/search?format=json&polygon_geojson=1&limit=1&q=${encodeURIComponent(
     query
   )}`;

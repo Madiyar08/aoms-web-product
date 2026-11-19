@@ -1,7 +1,5 @@
-import { randomUUID } from "node:crypto";
-
 export function newId(): string {
-  return randomUUID();
+  return globalThis.crypto.randomUUID();
 }
 
 export function nowIso(): string {

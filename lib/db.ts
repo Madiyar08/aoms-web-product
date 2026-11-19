@@ -36,6 +36,24 @@ interface DbLike {
 
 const globalForDb = globalThis as unknown as { __aomsDb?: DbLike };
 
+/** Table names are internal identifiers, never user-provided SQL fragments. */
+function assertTableName(table: string): string {
+  if (!/^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(table)) {
+    throw new Error("Недопустимое имя таблицы SQLite.");
+  }
+  return table;
+}
+
+function parseRow<T>(table: string, id: string | undefined, data: string): T {
+  try {
+    return JSON.parse(data) as T;
+  } catch (error) {
+    const context = id ? `таблица ${table}, запись ${id}` : `таблица ${table}`;
+    console.error(`[db] Повреждён JSON в ${context}`, error);
+    throw new Error(`Не удалось прочитать данные SQLite (${context}). Проверьте целостность базы и резервную копию.`);
+  }
+}
+
 function ensureDir(): void {
   const dir = path.dirname(DB_PATH);
   try {
@@ -71,7 +89,14 @@ function getDb(): DbLike {
     const nodeRequire = eval("require") as NodeRequire;
     const mod = nodeRequire("node:sqlite") as { DatabaseSync: new (p: string) => DbLike };
     try {
-      globalForDb.__aomsDb = new mod.DatabaseSync(DB_PATH);
+      const db = new mod.DatabaseSync(DB_PATH);
+      // Wait briefly for another application process holding a write lock.
+      // Keep the existing journal mode: changing it on a mounted production
+      // volume requires a separately planned backup/restore exercise.
+      db.exec("PRAGMA busy_timeout = 5000;");
+      db.exec("PRAGMA foreign_keys = ON;");
+      db.exec("PRAGMA synchronous = FULL;");
+      globalForDb.__aomsDb = db;
     } catch (e) {
       console.error(
         `[db] Не удалось открыть/создать файл базы данных "${DB_PATH}". Если путь указывает на смонтированный ` +
@@ -86,13 +111,15 @@ function getDb(): DbLike {
 }
 
 function ensureTable(table: string): void {
-  getDb().exec(`CREATE TABLE IF NOT EXISTS "${table}" (id TEXT PRIMARY KEY, data TEXT NOT NULL)`);
+  const safeTable = assertTableName(table);
+  getDb().exec(`CREATE TABLE IF NOT EXISTS "${safeTable}" (id TEXT PRIMARY KEY, data TEXT NOT NULL)`);
 }
 
 export function readAll<T>(table: string): T[] {
   ensureTable(table);
-  const rows = getDb().prepare(`SELECT data FROM "${table}"`).all() as { data: string }[];
-  return rows.map((r) => JSON.parse(r.data) as T);
+  const safeTable = assertTableName(table);
+  const rows = getDb().prepare(`SELECT id, data FROM "${safeTable}"`).all() as { id: string; data: string }[];
+  return rows.map((r) => parseRow<T>(safeTable, r.id, r.data));
 }
 
 export function findById<T>(table: string, id: string | undefined | null): T | null {
@@ -103,16 +130,18 @@ export function findById<T>(table: string, id: string | undefined | null): T | n
   // отчётов без ID банкомата). Явно отсекаем это здесь, на входе.
   if (!id) return null;
   ensureTable(table);
+  const safeTable = assertTableName(table);
   const row = getDb()
-    .prepare(`SELECT data FROM "${table}" WHERE id = ?`)
-    .get(id) as { data: string } | undefined;
-  return row ? (JSON.parse(row.data) as T) : null;
+    .prepare(`SELECT id, data FROM "${safeTable}" WHERE id = ?`)
+    .get(id) as { id: string; data: string } | undefined;
+  return row ? parseRow<T>(safeTable, row.id, row.data) : null;
 }
 
 export function insertRow<T extends { id: string }>(table: string, row: T): void {
   ensureTable(table);
+  const safeTable = assertTableName(table);
   getDb()
-    .prepare(`INSERT INTO "${table}" (id, data) VALUES (?, ?)`)
+    .prepare(`INSERT INTO "${safeTable}" (id, data) VALUES (?, ?)`)
     .run(row.id, JSON.stringify(row));
 }
 
@@ -122,15 +151,65 @@ export function updateRow<T extends { id: string }>(
   patch: Partial<T>
 ): boolean {
   ensureTable(table);
-  const existing = findById<T>(table, id);
+  const safeTable = assertTableName(table);
+  const existing = findById<T>(safeTable, id);
   if (!existing) return false;
   const merged = { ...existing, ...patch };
-  getDb().prepare(`UPDATE "${table}" SET data = ? WHERE id = ?`).run(JSON.stringify(merged), id);
+  getDb().prepare(`UPDATE "${safeTable}" SET data = ? WHERE id = ?`).run(JSON.stringify(merged), id);
   return true;
 }
 
 export function deleteRow(table: string, id: string): boolean {
   ensureTable(table);
-  const result = getDb().prepare(`DELETE FROM "${table}" WHERE id = ?`).run(id);
+  const safeTable = assertTableName(table);
+  const result = getDb().prepare(`DELETE FROM "${safeTable}" WHERE id = ?`).run(id);
   return result.changes > 0;
+}
+
+/** Execute synchronous SQLite writes atomically. Nested calls use SAVEPOINTs,
+ * so a caught inner failure cannot silently retain half of its writes. */
+let transactionDepth = 0;
+let savepointSequence = 0;
+export function withTransaction<T>(work: () => T): T {
+  const db = getDb();
+  const isOuter = transactionDepth === 0;
+  const savepoint = `aoms_nested_${++savepointSequence}`;
+  if (isOuter) db.exec("BEGIN IMMEDIATE");
+  else db.exec(`SAVEPOINT ${savepoint}`);
+  transactionDepth += 1;
+
+  try {
+    const result = work();
+    if (isOuter) db.exec("COMMIT");
+    else db.exec(`RELEASE SAVEPOINT ${savepoint}`);
+    return result;
+  } catch (error) {
+    try {
+      if (isOuter) db.exec("ROLLBACK");
+      else {
+        db.exec(`ROLLBACK TO SAVEPOINT ${savepoint}`);
+        db.exec(`RELEASE SAVEPOINT ${savepoint}`);
+      }
+    } catch (rollbackError) {
+      console.error("[db] rollback failed", rollbackError);
+    }
+    throw error;
+  } finally {
+    transactionDepth -= 1;
+  }
+}
+
+/** Lightweight, read-only diagnostics suitable for an admin health check. */
+export function checkDatabaseIntegrity(): { ok: boolean; result: string[]; journalMode: string; foreignKeys: number } {
+  const db = getDb();
+  const integrityRows = db.prepare("PRAGMA quick_check").all() as { quick_check?: string }[];
+  const result = integrityRows.map((row) => String(row.quick_check || "unknown"));
+  const journal = db.prepare("PRAGMA journal_mode").get() as { journal_mode?: string } | undefined;
+  const foreignKeys = db.prepare("PRAGMA foreign_keys").get() as { foreign_keys?: number } | undefined;
+  return {
+    ok: result.length > 0 && result.every((entry) => entry === "ok"),
+    result,
+    journalMode: String(journal?.journal_mode || "unknown"),
+    foreignKeys: Number(foreignKeys?.foreign_keys ?? 0),
+  };
 }

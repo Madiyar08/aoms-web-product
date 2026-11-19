@@ -37,27 +37,54 @@ export interface Cluster {
  * где k — число уже созданных кластеров).
  */
 export function clusterNearbyPoints(points: GeoPoint[], thresholdM: number): Cluster[] {
+  if (!Number.isFinite(thresholdM) || thresholdM < 0) return points.map((point, idx) => ({ point: { ...point }, memberIndexes: [idx] }));
   const clusters: Cluster[] = [];
-  points.forEach((p, idx) => {
+  points.forEach((point, idx) => {
     let target: Cluster | null = null;
-    for (const c of clusters) {
-      if (haversineMeters(c.point, p) <= thresholdM) {
-        target = c;
+    for (const cluster of clusters) {
+      // Complete-link rule: a new ATM must be within the threshold of
+      // EVERY member, not merely the moving centroid. This prevents chain
+      // merging (A—B—C) where A and C are actually far apart.
+      const isCloseToEveryMember = cluster.memberIndexes.every((memberIndex) =>
+        haversineMeters(points[memberIndex], point) <= thresholdM
+      );
+      if (isCloseToEveryMember) {
+        target = cluster;
         break;
       }
     }
     if (target) {
-      const n = target.memberIndexes.length + 1;
+      const count = target.memberIndexes.length;
       target.point = {
-        lat: (target.point.lat * (n - 1) + p.lat) / n,
-        lon: (target.point.lon * (n - 1) + p.lon) / n,
+        lat: (target.point.lat * count + point.lat) / (count + 1),
+        lon: (target.point.lon * count + point.lon) / (count + 1),
       };
       target.memberIndexes.push(idx);
     } else {
-      clusters.push({ point: { ...p }, memberIndexes: [idx] });
+      clusters.push({ point: { ...point }, memberIndexes: [idx] });
     }
   });
   return clusters;
+}
+
+/**
+ * Expands optimized cluster order back to ATM indexes. Members of each
+ * physical stop remain adjacent, so Smart ATM groups / terminals sharing
+ * one location are always visited in one consecutive block.
+ */
+export function flattenClusterMemberIndexes(clusters: Cluster[], clusterOrder: number[]): number[] {
+  const flattened: number[] = [];
+  const seen = new Set<number>();
+  for (const clusterIndex of clusterOrder) {
+    const cluster = clusters[clusterIndex];
+    if (!cluster) continue;
+    for (const memberIndex of cluster.memberIndexes) {
+      if (seen.has(memberIndex)) continue;
+      seen.add(memberIndex);
+      flattened.push(memberIndex);
+    }
+  }
+  return flattened;
 }
 
 /** Жадный алгоритм "ближайший сосед", начиная от депо. */

@@ -48,6 +48,9 @@ export function MiniAppClient() {
   const [showNoId, setShowNoId] = useState(false);
   const [showAtmIssue, setShowAtmIssue] = useState(false);
   const [showAudit, setShowAudit] = useState(false);
+  const [showInspectorReport, setShowInspectorReport] = useState(false);
+  const [showMyReports, setShowMyReports] = useState(false);
+  const [showMyReports, setShowMyReports] = useState(false);
   const [issuePrefill, setIssuePrefill] = useState<{ atmCode: string; address: string } | null>(null);
   const [doneIds, setDoneIds] = useState<Set<string>>(new Set());
 
@@ -132,6 +135,18 @@ export function MiniAppClient() {
     return <AuditScreen initData={initData!} onBack={() => setShowAudit(false)} />;
   }
 
+  if (showInspectorReport) {
+    return <InspectorReportScreen initData={initData!} onBack={() => setShowInspectorReport(false)} />;
+  }
+
+  if (showMyReports) {
+    return <MyCleaningReportsScreen initData={initData!} onBack={() => setShowMyReports(false)} />;
+  }
+
+  if (showMyReports) {
+    return <MyCleaningReportsScreen initData={initData!} onBack={() => setShowMyReports(false)} />;
+  }
+
   if (showAtmIssue) {
     return (
       <AtmIssueScreen
@@ -209,6 +224,20 @@ export function MiniAppClient() {
         onOpen={(atm) => setSelectedAtm(atm)}
       />
 
+      <button
+        onClick={() => setShowMyReports(true)}
+        className="mt-3 w-full border border-blue-200 bg-blue-50 rounded-xl p-3 text-[13px] font-semibold text-blue-800"
+      >
+        📋 Мои отчёты и результаты проверки
+      </button>
+
+      <button
+        onClick={() => setShowMyReports(true)}
+        className="mt-3 w-full border border-blue-200 bg-blue-50 rounded-xl p-3 text-[13px] font-semibold text-blue-800"
+      >
+        📋 Мои отчёты и результаты проверки
+      </button>
+
       {/* Список маршрута — БЕЗ ID (чтобы не потерять антифрод), но адрес и
           статус видны для ориентира: сколько осталось и где примерно. */}
       {atms.length > 0 && (
@@ -263,6 +292,15 @@ export function MiniAppClient() {
         </button>
       )}
 
+      {employeeRole === "Проверяющий" && (
+        <button
+          onClick={() => setShowInspectorReport(true)}
+          className="mt-2 w-full border-2 border-indigo-200 bg-indigo-50 rounded-xl p-3 text-[13px] font-medium text-indigo-800"
+        >
+          📝 Создать инспекторский отчёт
+        </button>
+      )}
+
       {/* "Вне маршрута" уже обрабатывается автоматически полем ID выше —
           если введённый ID найден в базе и в том же районе, карточка
           откроется сама. Кнопка ниже — для банкоматов, которых нет в
@@ -284,6 +322,142 @@ export function MiniAppClient() {
           🚗 Одометр и топливо
         </button>
       )}
+    </div>
+  );
+}
+
+type MyCleaningReport = {
+  id: string;
+  atmCode: string;
+  submittedAt: string;
+  submittedDate: string;
+  status: "pending" | "approved" | "rejected" | string;
+  reviewedAt: string | null;
+  reviewComment: string;
+  antifraud: boolean;
+};
+
+function MyCleaningReportsScreen({ initData, onBack }: { initData: string; onBack: () => void }) {
+  const [reports, setReports] = useState<MyCleaningReport[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  async function load() {
+    setLoading(true);
+    setError(null);
+    try {
+      const response = await fetch("/api/miniapp/my-cleaning-reports", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ initData }),
+      });
+      const data = await response.json();
+      if (!response.ok || !data.ok) throw new Error(data.error || "Не удалось загрузить отчёты.");
+      setReports(Array.isArray(data.reports) ? data.reports : []);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Ошибка соединения.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => { load(); }, [initData]);
+
+  const statusLabel = (status: string) => status === "approved" ? "Утверждён" : status === "rejected" ? "Отклонён" : "Ожидает проверки";
+  const statusClass = (status: string) => status === "approved" ? "bg-green-50 border-green-200 text-green-700" : status === "rejected" ? "bg-red-50 border-red-200 text-red-700" : "bg-amber-50 border-amber-200 text-amber-800";
+
+  return (
+    <div className="p-4 max-w-md mx-auto">
+      <button onClick={onBack} className="text-sm text-gray-500 mb-3">← Назад</button>
+      <div className="flex items-center justify-between gap-2 mb-3">
+        <div>
+          <h1 className="text-base font-semibold">📋 Мои отчёты</h1>
+          <p className="text-[12px] text-gray-500">История отправок и решения руководителя</p>
+        </div>
+        <button onClick={load} disabled={loading} className="text-xs font-semibold border rounded-lg px-3 py-2 disabled:opacity-50">Обновить</button>
+      </div>
+      {loading && <p className="text-sm text-gray-500 py-6 text-center">Загрузка отчётов…</p>}
+      {error && <div className="bg-red-50 border border-red-200 text-red-700 rounded-lg p-3 text-sm">{error}</div>}
+      {!loading && !error && reports.length === 0 && <div className="bg-gray-50 border rounded-lg p-4 text-sm text-gray-500">У вас пока нет отправленных отчётов.</div>}
+      {!loading && !error && reports.length > 0 && (
+        <>
+          <div className="grid grid-cols-3 gap-2 mb-3">
+            <div className="bg-amber-50 rounded-lg p-2 text-center"><div className="text-lg font-bold text-amber-700">{reports.filter(r => r.status === "pending").length}</div><div className="text-[10px] text-amber-800">Ожидают</div></div>
+            <div className="bg-green-50 rounded-lg p-2 text-center"><div className="text-lg font-bold text-green-700">{reports.filter(r => r.status === "approved").length}</div><div className="text-[10px] text-green-800">Утверждены</div></div>
+            <div className="bg-red-50 rounded-lg p-2 text-center"><div className="text-lg font-bold text-red-700">{reports.filter(r => r.status === "rejected").length}</div><div className="text-[10px] text-red-800">Отклонены</div></div>
+          </div>
+          <div className="flex flex-col gap-2">
+            {reports.map(report => (
+              <article key={report.id} className="border border-gray-200 rounded-xl p-3 bg-white">
+                <div className="flex items-start justify-between gap-2">
+                  <div><div className="font-semibold text-sm">ATM {report.atmCode || "без ID"}</div><div className="text-[11px] text-gray-500">{report.submittedDate} · {new Date(report.submittedAt).toLocaleTimeString("ru-RU", { timeZone: "Asia/Tashkent", hour: "2-digit", minute: "2-digit" })}</div></div>
+                  <span className={`shrink-0 border rounded-full px-2 py-1 text-[10px] font-semibold ${statusClass(report.status)}`}>{statusLabel(report.status)}</span>
+                </div>
+                {report.antifraud && <div className="mt-2 text-[11px] text-amber-700 bg-amber-50 rounded-md p-2">Отчёт отмечен для дополнительной проверки.</div>}
+                {report.status !== "pending" && <div className="mt-2 text-[11px] text-gray-500">{report.reviewedAt ? `Рассмотрен: ${new Date(report.reviewedAt).toLocaleString("ru-RU", { timeZone: "Asia/Tashkent" })}` : "Решение сохранено"}</div>}
+                {report.status === "rejected" && report.reviewComment && <div className="mt-2 bg-red-50 rounded-md p-2 text-[12px] text-red-800"><b>Комментарий руководителя:</b> {report.reviewComment}</div>}
+                {report.status === "approved" && report.reviewComment && <div className="mt-2 bg-green-50 rounded-md p-2 text-[12px] text-green-800"><b>Комментарий:</b> {report.reviewComment}</div>}
+              </article>
+            ))}
+          </div>
+          <p className="text-[10px] text-gray-400 mt-3">Показаны последние {reports.length} отчётов (максимум 100).</p>
+        </>
+      )}
+    </div>
+  );
+}
+
+type MyCleaningReport = {
+  id: string; atmCode: string; submittedAt: string; submittedDate: string;
+  status: "pending" | "approved" | "rejected" | string;
+  reviewedAt: string | null; reviewComment: string; antifraud: boolean;
+};
+
+function MyCleaningReportsScreen({ initData, onBack }: { initData: string; onBack: () => void }) {
+  const [reports, setReports] = useState<MyCleaningReport[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  async function load() {
+    setLoading(true); setError(null);
+    try {
+      const response = await fetch("/api/miniapp/my-cleaning-reports", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ initData }),
+      });
+      const data = await response.json();
+      if (!response.ok || !data.ok) throw new Error(data.error || "Не удалось загрузить отчёты.");
+      setReports(Array.isArray(data.reports) ? data.reports : []);
+    } catch (e) { setError(e instanceof Error ? e.message : "Ошибка соединения."); }
+    finally { setLoading(false); }
+  }
+  useEffect(() => { load(); }, [initData]);
+  const statusLabel = (status: string) => status === "approved" ? "Утверждён" : status === "rejected" ? "Отклонён" : "Ожидает проверки";
+  const statusClass = (status: string) => status === "approved" ? "bg-green-50 border-green-200 text-green-700" : status === "rejected" ? "bg-red-50 border-red-200 text-red-700" : "bg-amber-50 border-amber-200 text-amber-800";
+
+  return (
+    <div className="p-4 max-w-md mx-auto">
+      <button onClick={onBack} className="text-sm text-gray-500 mb-3">← Назад</button>
+      <div className="flex items-center justify-between gap-2 mb-3">
+        <div><h1 className="text-base font-semibold">📋 Мои отчёты</h1><p className="text-[12px] text-gray-500">История отправок и решения руководителя</p></div>
+        <button onClick={load} disabled={loading} className="text-xs font-semibold border rounded-lg px-3 py-2 disabled:opacity-50">Обновить</button>
+      </div>
+      {loading && <p className="text-sm text-gray-500 py-6 text-center">Загрузка отчётов…</p>}
+      {error && <div className="bg-red-50 border border-red-200 text-red-700 rounded-lg p-3 text-sm">{error}</div>}
+      {!loading && !error && reports.length === 0 && <div className="bg-gray-50 border rounded-lg p-4 text-sm text-gray-500">У вас пока нет отправленных отчётов.</div>}
+      {!loading && !error && reports.length > 0 && <>
+        <div className="grid grid-cols-3 gap-2 mb-3">
+          <div className="bg-amber-50 rounded-lg p-2 text-center"><div className="text-lg font-bold text-amber-700">{reports.filter(r => r.status === "pending").length}</div><div className="text-[10px] text-amber-800">Ожидают</div></div>
+          <div className="bg-green-50 rounded-lg p-2 text-center"><div className="text-lg font-bold text-green-700">{reports.filter(r => r.status === "approved").length}</div><div className="text-[10px] text-green-800">Утверждены</div></div>
+          <div className="bg-red-50 rounded-lg p-2 text-center"><div className="text-lg font-bold text-red-700">{reports.filter(r => r.status === "rejected").length}</div><div className="text-[10px] text-red-800">Отклонены</div></div>
+        </div>
+        <div className="flex flex-col gap-2">{reports.map(report => <article key={report.id} className="border border-gray-200 rounded-xl p-3 bg-white">
+          <div className="flex items-start justify-between gap-2"><div><div className="font-semibold text-sm">ATM {report.atmCode || "без ID"}</div><div className="text-[11px] text-gray-500">{report.submittedDate} · {new Date(report.submittedAt).toLocaleTimeString("ru-RU", { timeZone: "Asia/Tashkent", hour: "2-digit", minute: "2-digit" })}</div></div><span className={`shrink-0 border rounded-full px-2 py-1 text-[10px] font-semibold ${statusClass(report.status)}`}>{statusLabel(report.status)}</span></div>
+          {report.antifraud && <div className="mt-2 text-[11px] text-amber-700 bg-amber-50 rounded-md p-2">Отчёт отмечен для дополнительной проверки.</div>}
+          {report.status !== "pending" && <div className="mt-2 text-[11px] text-gray-500">{report.reviewedAt ? `Рассмотрен: ${new Date(report.reviewedAt).toLocaleString("ru-RU", { timeZone: "Asia/Tashkent" })}` : "Решение сохранено"}</div>}
+          {report.reviewComment && <div className={`mt-2 rounded-md p-2 text-[12px] ${report.status === "rejected" ? "bg-red-50 text-red-800" : "bg-gray-50 text-gray-700"}`}><b>Комментарий руководителя:</b> {report.reviewComment}</div>}
+        </article>)}</div>
+        <p className="text-[10px] text-gray-400 mt-3">Показаны последние {reports.length} отчётов (максимум 100).</p>
+      </>}
     </div>
   );
 }
@@ -421,10 +595,11 @@ function ReportScreen({
   const [addressCorrect, setAddressCorrect] = useState<boolean | null>(null);
   const [coordsCorrect, setCoordsCorrect] = useState<boolean | null>(null);
   const [locationComment, setLocationComment] = useState("");
-  const [gps, setGps] = useState<{ lat: number; lon: number; accuracy: number } | null>(null);
+  const [gps, setGps] = useState<{ lat: number; lon: number; accuracy: number; capturedAt: string } | null>(null);
   const [gpsError, setGpsError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
-  const submittingRef = useRef(false); // синхронная защита от двойного клика — react-состояние обновляется не мгновенно
+  const submittingRef = useRef(false); // синхронная защита от двойного клика
+  const submissionIdRef = useRef<string>(`clean_${typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `${Date.now()}_${Math.random().toString(36).slice(2)}`}`);
   const [result, setResult] = useState<string | null>(null);
 
   const isAdHoc = atm.id === "";
@@ -446,7 +621,7 @@ function ReportScreen({
         (pos) => {
           if (!best || pos.coords.accuracy < best.coords.accuracy) {
             best = pos;
-            setGps({ lat: pos.coords.latitude, lon: pos.coords.longitude, accuracy: Math.round(pos.coords.accuracy) });
+            setGps({ lat: pos.coords.latitude, lon: pos.coords.longitude, accuracy: Math.round(pos.coords.accuracy), capturedAt: new Date(pos.timestamp).toISOString() });
           }
           attempts += 1;
           // Останавливаемся, как только точность достаточная (<=50м) или
@@ -493,6 +668,8 @@ function ReportScreen({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           initData,
+          submissionId: submissionIdRef.current,
+          gpsCapturedAt: gps?.capturedAt,
           atmId: atm.id || undefined,
           atmCode: enteredCode,
           enteredCode,
@@ -513,6 +690,8 @@ function ReportScreen({
       const data = await res.json();
       if (!data.ok) {
         setResult(data.error || "Ошибка отправки");
+      } else if (data.pending) {
+        setResult(data.message || "Отправка уже обрабатывается. Повторно отправлять не нужно.");
       } else {
         setResult(
           data.codeMismatch
@@ -522,7 +701,24 @@ function ReportScreen({
         setTimeout(onDone, 1800);
       }
     } catch {
-      setResult("Не удалось отправить. Проверьте связь.");
+      // При обрыве сети ответ мог потеряться уже ПОСЛЕ сохранения отчёта.
+      // Проверяем серверный статус по тому же submissionId, прежде чем
+      // предлагать сотруднику повторять отправку.
+      try {
+        const params = new URLSearchParams({ initData, submissionId: submissionIdRef.current });
+        const statusResponse = await fetch(`/api/miniapp/submission-status?${params.toString()}`, { cache: "no-store" });
+        const statusData = await statusResponse.json();
+        if (statusData.ok && statusData.status === "completed") {
+          setResult("Отчёт уже принят. Повторная отправка не требуется.");
+          setTimeout(onDone, 1800);
+        } else if (statusData.ok && statusData.status === "processing") {
+          setResult("Сервер обрабатывает отправку. Не отправляйте отчёт повторно.");
+        } else {
+          setResult("Не удалось подтвердить отправку. Проверьте связь и повторите попытку — система проверит предыдущий запрос.");
+        }
+      } catch {
+        setResult("Связь прервалась. Не создавайте новый отчёт: при повторной попытке система проверит предыдущую отправку.");
+      }
     }
     submittingRef.current = false;
     setSubmitting(false);
@@ -998,6 +1194,8 @@ function NoIdScreen({ initData, onBack }: { initData: string; onBack: () => void
   const [address, setAddress] = useState("");
   const [comment, setComment] = useState("");
   const [photos, setPhotos] = useState<string[]>([]);
+  const [video, setVideo] = useState<File | null>(null);
+  const [videoDuration, setVideoDuration] = useState(0);
   const [gps, setGps] = useState<{ lat: number; lon: number } | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const submittingRef = useRef(false); // синхронная защита от двойного клика — react-состояние обновляется не мгновенно
@@ -1174,6 +1372,8 @@ function AtmIssueScreen({
   const [otherText, setOtherText] = useState("");
   const [comment, setComment] = useState("");
   const [photos, setPhotos] = useState<string[]>([]);
+  const [video, setVideo] = useState<File | null>(null);
+  const [videoDuration, setVideoDuration] = useState(0);
   const [gps, setGps] = useState<{ lat: number; lon: number } | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const submittingRef = useRef(false); // синхронная защита от двойного клика — react-состояние обновляется не мгновенно
@@ -1785,4 +1985,119 @@ function AuditByDateFlow({ initData }: { initData: string }) {
       </div>
     </div>
   );
+}
+
+
+function InspectorReportScreen({ initData, onBack }: { initData: string; onBack: () => void }) {
+  const [atmCode, setAtmCode] = useState("");
+  const [comment, setComment] = useState("");
+  const [photos, setPhotos] = useState<string[]>([]);
+  const [video, setVideo] = useState<File | null>(null);
+  const [videoDuration, setVideoDuration] = useState(0);
+  const [gps, setGps] = useState<{ latitude: number; longitude: number; gpsAccuracy: number | null; gpsCapturedAt: string } | null>(null);
+  const [gpsState, setGpsState] = useState("Местоположение ещё не получено");
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+
+  async function readPhoto(file: File): Promise<string> {
+    if (!file.type.startsWith("image/")) throw new Error("Выберите файл изображения");
+    if (file.size > 12 * 1024 * 1024) throw new Error("Размер одного фото не должен превышать 12 МБ");
+    const source = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => typeof reader.result === "string" ? resolve(reader.result) : reject(new Error("Не удалось прочитать фото"));
+      reader.onerror = () => reject(new Error("Не удалось прочитать фото"));
+      reader.readAsDataURL(file);
+    });
+    // Сжимаем на телефоне до отправки, чтобы не передавать оригиналы по несколько мегабайт.
+    const image = await new Promise<HTMLImageElement>((resolve, reject) => {
+      const img = new Image(); img.onload = () => resolve(img); img.onerror = () => reject(new Error("Не удалось открыть фото")); img.src = source;
+    });
+    const scale = Math.min(1, 1600 / Math.max(image.naturalWidth, image.naturalHeight));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
+    canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
+    const ctx = canvas.getContext("2d");
+    if (!ctx) throw new Error("Не удалось обработать фото");
+    ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL("image/jpeg", 0.78);
+  }
+
+  async function addFiles(files: FileList | null) {
+    if (!files?.length) return;
+    if (photos.length + files.length > 5) { setMessage("Можно приложить не более 5 фотографий"); return; }
+    setMessage("");
+    try {
+      const encoded = await Promise.all(Array.from(files).map(readPhoto));
+      setPhotos((current) => [...current, ...encoded].slice(0, 5));
+    } catch (error) { setMessage(error instanceof Error ? error.message : "Ошибка обработки фото"); }
+  }
+
+  function captureGps() {
+    if (!navigator.geolocation) { setGpsState("Геолокация не поддерживается браузером"); return; }
+    setGpsState("Получаем координаты…");
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        const captured = { latitude: position.coords.latitude, longitude: position.coords.longitude, gpsAccuracy: Number.isFinite(position.coords.accuracy) ? position.coords.accuracy : null, gpsCapturedAt: new Date(position.timestamp).toISOString() };
+        setGps(captured);
+        setGpsState(`Координаты получены · точность ${captured.gpsAccuracy === null ? "неизвестна" : `${Math.round(captured.gpsAccuracy)} м`}`);
+      },
+      (error) => setGpsState(error.code === error.PERMISSION_DENIED ? "Доступ к геолокации запрещён. Можно отправить отчёт без GPS." : "Не удалось получить GPS. Можно повторить или отправить без него."),
+      { enableHighAccuracy: true, timeout: 12000, maximumAge: 0 }
+    );
+  }
+
+  async function submit() {
+    if (comment.trim().length < 3) { setMessage("Добавьте комментарий (минимум 3 символа)"); return; }
+    setBusy(true); setMessage("");
+    try {
+      const form = new FormData();
+      form.set("initData", initData); form.set("atmCode", atmCode.trim());
+      form.set("comment", comment.trim()); form.set("photos", JSON.stringify(photos));
+      if (gps) Object.entries(gps).forEach(([key, value]) => form.set(key, String(value)));
+      if (video) { form.set("video", video); form.set("videoDurationSeconds", String(videoDuration)); }
+      const response = await fetch("/api/miniapp/inspector-report", { method: "POST", body: form });
+      const result = await response.json();
+      if (!response.ok || !result.ok) throw new Error(result.error || "Не удалось отправить отчёт");
+      setMessage("Отчёт сохранён. Спасибо!");
+      setComment(""); setAtmCode(""); setPhotos([]); setVideo(null); setVideoDuration(0); setGps(null); setGpsState("Местоположение ещё не получено");
+    } catch (error) { setMessage(error instanceof Error ? error.message : "Ошибка отправки"); }
+    finally { setBusy(false); }
+  }
+
+  return <div className="p-4 max-w-md mx-auto">
+    <button onClick={onBack} className="mb-4 text-sm text-gray-600">← Назад</button>
+    <h2 className="text-lg font-semibold mb-1">Инспекторский отчёт</h2>
+    <p className="text-xs text-gray-500 mb-4">Отдельный отчёт о проверке. Не влияет на KPI уборки.</p>
+    <label className="block text-xs font-medium mb-1">ID банкомата (если известен)</label>
+    <input value={atmCode} onChange={(e) => setAtmCode(e.target.value)} placeholder="Введите ID" className="w-full rounded-lg border border-gray-300 bg-white p-3 text-sm mb-3" />
+    <label className="block text-xs font-medium mb-1">Комментарий *</label>
+    <textarea value={comment} onChange={(e) => setComment(e.target.value)} rows={5} maxLength={3000} placeholder="Опишите состояние банкомата и замечания…" className="w-full rounded-lg border border-gray-300 bg-white p-3 text-sm mb-3" />
+    <div className="rounded-lg border border-gray-200 bg-white p-3 mb-3">
+      <div className="text-xs font-medium mb-2">Фотографии ({photos.length}/5)</div>
+      <input type="file" accept="image/*" capture="environment" multiple onChange={(e) => { void addFiles(e.target.files); e.currentTarget.value = ""; }} disabled={photos.length >= 5} className="block w-full text-xs" />
+      {photos.length > 0 && <div className="grid grid-cols-3 gap-2 mt-3">{photos.map((photo, index) => <div key={index} className="relative"><img src={photo} alt={`Фото ${index + 1}`} className="h-20 w-full rounded object-cover" /><button onClick={() => setPhotos((items) => items.filter((_, i) => i !== index))} className="absolute -right-1 -top-1 rounded-full bg-black/70 px-2 py-1 text-xs text-white" aria-label="Удалить фото">×</button></div>)}</div>}
+    </div>
+    <div className="rounded-lg border border-gray-200 bg-white p-3 mb-3">
+      <div className="text-xs font-medium mb-2">Видео (необязательно, до 60 секунд)</div>
+      <input type="file" accept="video/mp4,video/webm,video/quicktime" capture="environment" onChange={(e) => {
+        const file = e.target.files?.[0] || null; e.currentTarget.value = "";
+        if (!file) return;
+        if (file.size > 50 * 1024 * 1024) { setMessage("Размер видео не должен превышать 50 МБ"); return; }
+        const url = URL.createObjectURL(file); const media = document.createElement("video"); media.preload = "metadata"; media.onloadedmetadata = () => {
+          URL.revokeObjectURL(url);
+          if (!Number.isFinite(media.duration) || media.duration <= 0 || media.duration > 60) { setMessage("Продолжительность видео должна быть не более 60 секунд"); return; }
+          setVideo(file); setVideoDuration(media.duration); setMessage("");
+        }; media.onerror = () => { URL.revokeObjectURL(url); setMessage("Не удалось проверить видео"); }; media.src = url;
+      }} className="block w-full text-xs" />
+      {video && <div className="mt-2 flex items-center justify-between text-xs"><span>{video.name} · {Math.ceil(videoDuration)} сек.</span><button type="button" onClick={() => { setVideo(null); setVideoDuration(0); }} className="text-red-600">Удалить</button></div>}
+      <p className="mt-1 text-[10px] text-gray-500">MP4, WebM или MOV · до 50 МБ. Видео сохраняется на сервере; Telegram-архивирование будет добавлено отдельно.</p>
+    </div>
+    <div className="rounded-lg border border-gray-200 bg-white p-3 mb-4">
+      <div className="text-xs font-medium mb-1">GPS-координаты</div>
+      <p className="text-[11px] text-gray-500 mb-2">{gpsState}</p>
+      <button onClick={captureGps} type="button" className="rounded-lg bg-gray-100 px-3 py-2 text-xs font-medium">Получить GPS</button>
+    </div>
+    {message && <div className="rounded-lg bg-blue-50 text-blue-800 p-3 text-xs mb-3">{message}</div>}
+    <button onClick={submit} disabled={busy} className="w-full rounded-xl bg-indigo-700 p-3 text-sm font-semibold text-white disabled:opacity-50">{busy ? "Отправка…" : "Отправить отчёт"}</button>
+  </div>;
 }

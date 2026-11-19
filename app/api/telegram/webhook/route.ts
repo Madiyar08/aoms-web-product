@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { validateTelegramWebhookSecret } from "@/lib/telegram-webapp";
 import { getEmployeeById, updateEmployee } from "@/lib/employees";
 import { findEmployeeByChatId } from "@/lib/miniapp";
 import { recordLocationPing } from "@/lib/location-pings";
@@ -10,6 +11,12 @@ import {
 } from "@/lib/telegram";
 
 export async function POST(req: NextRequest) {
+  const configuredSecret = process.env.TELEGRAM_WEBHOOK_SECRET;
+  const suppliedSecret = req.headers.get("x-telegram-bot-api-secret-token");
+  if (!validateTelegramWebhookSecret(configuredSecret, suppliedSecret)) {
+    return NextResponse.json({ ok: false, error: configuredSecret ? "Unauthorized webhook" : "Webhook secret is not configured" }, { status: configuredSecret ? 401 : 503 });
+  }
+
   const update = (await req.json()) as TelegramUpdate;
 
   // Live-геопозиция (Этап 1 трекинга экипажей): первое сообщение с

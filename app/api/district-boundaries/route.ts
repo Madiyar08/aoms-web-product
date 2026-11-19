@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { saveDistrictBoundary } from "@/lib/district-boundaries";
+import { validateBoundaryPoints } from "@/lib/geometry-polygon";
 
 /**
  * Принимает точки границы района. МИНИМУМ 1 точка допустим намеренно:
@@ -12,16 +13,15 @@ import { saveDistrictBoundary } from "@/lib/district-boundaries";
  * хочет максимальной точности отдельного района.
  */
 export async function POST(req: NextRequest) {
-  const { district, points } = await req.json();
-  if (!district || !Array.isArray(points) || points.length < 1) {
-    return NextResponse.json({ ok: false, error: "Нужен район и хотя бы одна точка (центр)" }, { status: 400 });
+  const { district, regionId, region, points } = await req.json();
+  if (!district || typeof district !== "string" || !Array.isArray(points)) {
+    return NextResponse.json({ ok: false, error: "Нужен район и массив координат" }, { status: 400 });
   }
-  const clean = points
-    .map((p: any) => ({ lat: Number(p.lat), lon: Number(p.lon) }))
-    .filter((p: any) => !Number.isNaN(p.lat) && !Number.isNaN(p.lon));
-  if (clean.length < 1) {
-    return NextResponse.json({ ok: false, error: "Некорректные координаты точек" }, { status: 400 });
+  const clean = points.map((p: any) => ({ lat: Number(p?.lat), lon: Number(p?.lon) }));
+  const validation = validateBoundaryPoints(clean);
+  if (!validation.ok) {
+    return NextResponse.json({ ok: false, error: validation.reason }, { status: 400 });
   }
-  saveDistrictBoundary(String(district), clean);
+  saveDistrictBoundary(String(district), clean, typeof regionId === "string" ? regionId : undefined, typeof region === "string" ? region : undefined);
   return NextResponse.json({ ok: true });
 }

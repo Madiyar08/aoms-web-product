@@ -1,5 +1,7 @@
 "use server";
 
+import { requireAdminPermission } from "@/lib/access-control";
+
 import { createProblemReport, deleteProblemReport, updateProblemReport } from "@/lib/problem-atms";
 import { findAtmByCode, updateAtm } from "@/lib/atms";
 import { listStatuses } from "@/lib/statuses";
@@ -8,6 +10,7 @@ import { formatTashkentDateTime } from "@/lib/tz";
 import { revalidatePath } from "next/cache";
 
 export async function createProblemReportAction(formData: FormData) {
+  requireAdminPermission("operations:write");
   const atmCode = String(formData.get("atmCode") || "").trim();
   const reason = String(formData.get("reason") || "");
   const comment = String(formData.get("comment") || "");
@@ -46,6 +49,7 @@ export async function createProblemReportAction(formData: FormData) {
 }
 
 export async function sendToTechnicianAction(reportId: string, atmCode: string, address: string, coordinates: string, reason: string, reportedBy: string, dateTime: string) {
+  requireAdminPermission("operations:write");
   const result = await notifyTechnician({ atmCode, address, coordinates, reason, reportedBy, dateTime });
   updateProblemReport(reportId, {
     status: result.ok ? "Передан технику" : "Новый",
@@ -55,11 +59,13 @@ export async function sendToTechnicianAction(reportId: string, atmCode: string, 
 }
 
 export async function resolveProblemReportAction(id: string) {
+  requireAdminPermission("operations:write");
   updateProblemReport(id, { status: "Решён" });
   revalidatePath("/problem-atms");
 }
 
 export async function deleteProblemReportAction(id: string) {
+  requireAdminPermission("operations:write");
   deleteProblemReport(id);
   revalidatePath("/problem-atms");
 }

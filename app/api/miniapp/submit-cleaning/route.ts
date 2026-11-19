@@ -5,16 +5,19 @@ import { getAtmById, findAtmByCode, updateAtm } from "@/lib/atms";
 import { listMachines } from "@/lib/machines";
 import { getStatusById } from "@/lib/statuses";
 import { listCategories } from "@/lib/categories";
-import { createCleaningReport, updateCleaningReport } from "@/lib/cleaning-reports";
-import { notifyManagerReport, notifyCleaningReportToGroup } from "@/lib/notifications";
-import { formatTashkentDateTime } from "@/lib/tz";
-import { savePhotoFile, archivePhotoToTelegram } from "@/lib/photo-storage";
+import { createCleaningReport } from "@/lib/cleaning-reports";
+import { savePhotoFile } from "@/lib/photo-storage";
 import { submitChangeRequest } from "@/lib/atm-change-history";
+import { completeSubmission, getSubmissionRecord, isSubmissionReservationStale, reserveSubmission } from "@/lib/submission-idempotency";
+import { enqueueCleaningReportDelivery } from "@/lib/delivery-queue";
+import { withTransaction } from "@/lib/db";
 
 export async function POST(req: NextRequest) {
   const body = await req.json();
   const {
     initData,
+    submissionId,
+    gpsCapturedAt,
     atmId,
     atmCode,
     enteredCode,
@@ -122,9 +125,10 @@ export async function POST(req: NextRequest) {
     atmLon: atm ? parseFloat(atm.longitude) : NaN,
     gpsLat: parseFloat(String(gpsLat)),
     gpsLon: parseFloat(String(gpsLon)),
-    hasPhoto: Boolean(photoData),
+    hasPhoto: Boolean(photoData || (Array.isArray(photos) && photos.length > 0)),
     photoFromCamera: Boolean(photoFromCamera),
     inRoute,
+    gpsAccuracy: Number.isFinite(Number(gpsAccuracy)) ? Number(gpsAccuracy) : undefined,
   });
   if (codeMismatch) {
     antifraud.flags.push(`Введённый ID (${codeForLookup}) не совпадает с ID банкомата в маршруте (${atm?.code})`);
@@ -136,6 +140,37 @@ export async function POST(req: NextRequest) {
   // разрасталась.
   // Сохраняем все фото файлами (не base64 в БД). Поддерживаем и старый
   // одиночный photoData, и новый массив photos (минимум 5 с телефона).
+  // Server-side idempotency: repeated requests from the same employee and
+  // form submission resolve to the original report instead of creating duplicates.
+  const clientSubmissionId = String(submissionId || "").trim();
+  let idempotencyKey = "";
+  if (clientSubmissionId) {
+    if (!/^[a-zA-Z0-9_-]{12,100}$/.test(clientSubmissionId)) {
+      return NextResponse.json({ ok: false, error: "Некорректный идентификатор отправки." }, { status: 400 });
+    }
+    idempotencyKey = `${employee.id}:${clientSubmissionId}`;
+    const previous = getSubmissionRecord(idempotencyKey);
+    if (previous) {
+      if (previous.employeeId !== employee.id) {
+        return NextResponse.json({ ok: false, error: "Идентификатор отправки недействителен." }, { status: 409 });
+      }
+      if (previous.status === "completed" && previous.reportId) {
+        return NextResponse.json({ ok: true, duplicate: true, reportId: previous.reportId, message: "Этот отчёт уже принят." });
+      }
+      if (!isSubmissionReservationStale(previous)) {
+        return NextResponse.json({ ok: true, pending: true, message: "Отправка уже обрабатывается. Повторный отчёт не создан." }, { status: 202 });
+      }
+    }
+    // There is no await between checking and inserting/updating: reservation
+    // is persisted before image processing or other asynchronous work.
+    try {
+      reserveSubmission(idempotencyKey, employee.id);
+    } catch {
+      return NextResponse.json({ ok: true, pending: true, message: "Отправка уже обрабатывается. Повторный отчёт не создан." }, { status: 202 });
+    }
+  }
+
+
   const allPhotoInputs: string[] =
     Array.isArray(photos) && photos.length > 0 ? photos : photoData ? [photoData] : [];
   const photoUrls = (
@@ -148,7 +183,8 @@ export async function POST(req: NextRequest) {
     (m) => m.employee1Id === employee.id || m.employee2Id === employee.id
   );
 
-  const report = createCleaningReport({
+  const report = withTransaction(() => {
+    const created = createCleaningReport({
     atmId: resolvedAtmId,
     atmCode: resolvedAtmCode,
     employeeId: employee.id,
@@ -158,6 +194,11 @@ export async function POST(req: NextRequest) {
     photosJson: photoUrls.length > 0 ? JSON.stringify(photoUrls) : undefined,
     gpsLat: String(gpsLat),
     gpsLon: String(gpsLon),
+    gpsAccuracy: Number.isFinite(Number(gpsAccuracy)) ? Number(gpsAccuracy) : undefined,
+    gpsCapturedAt: typeof gpsCapturedAt === "string" ? gpsCapturedAt : undefined,
+    gpsQuality: !Number.isFinite(Number(gpsAccuracy)) ? "unavailable" : Number(gpsAccuracy) > 50 ? "low_accuracy" : "good",
+    antifraudResult: antifraud.flags.length > 0 ? "review" : "clear",
+    antifraudReason: antifraud.flags,
     clientTime: clientTime || new Date().toISOString(),
     inRoute,
     distanceMeters: antifraud.distanceMeters,
@@ -169,6 +210,11 @@ export async function POST(req: NextRequest) {
     addressCorrect: Boolean(addressCorrect),
     coordsCorrect: Boolean(coordsCorrect),
     locationComment: String(locationComment || ""),
+    });
+    // Report, durable delivery job and idempotency completion commit together.
+    enqueueCleaningReportDelivery(created.id);
+    if (idempotencyKey) completeSubmission(idempotencyKey, created.id);
+    return created;
   });
 
   // 6. Помечаем банкомат обслуженным сегодня — это и зелёный статус, и
@@ -226,57 +272,9 @@ export async function POST(req: NextRequest) {
     });
   }
 
-  // 7 и 8. Отправку в Telegram НЕ ждём (без await): раньше сотрудник ждал,
-  // пока все фото (до 5) уйдут в группу и, при антифроде, руководителю —
-  // это занимало много секунд, телефон на мобильной связи обрывал
-  // соединение (ECONNRESET / "aborted" в логах), а в приложении долго
-  // висело "Отправка…". Теперь отчёт уже сохранён, поэтому отвечаем
-  // сотруднику сразу, а доставку в Telegram выполняем в фоне. Если она
-  // не удастся — отчёт всё равно сохранён в системе и виден руководителю.
-  const backgroundNotify = async () => {
-    try {
-      // Переносим фото на диске в архивный Telegram-канал ПОСЛЕ ответа
-      // сотруднику — освобождает место на диске, но не задерживает
-      // "Отчёт принят". Если канал не настроен/недоступен — фото
-      // остаётся на диске (archivePhotoToTelegram вернёт null), это не
-      // ошибка, а нормальный запасной вариант.
-      let reportForNotify = report;
-      if (photoUrls.length > 0) {
-        const archivedUrls = await Promise.all(
-          photoUrls.map((u) => archivePhotoToTelegram(u, `Отчёт: ${resolvedAtmCode || atm?.name || "банкомат"}`))
-        );
-        const finalUrls = archivedUrls.map((archived, i) => archived || photoUrls[i]);
-        if (finalUrls.some((u, i) => u !== photoUrls[i])) {
-          updateCleaningReport(report.id, {
-            photoData: finalUrls[0] || "",
-            photosJson: finalUrls.length > 0 ? JSON.stringify(finalUrls) : undefined,
-          });
-          reportForNotify = {
-            ...report,
-            photoData: finalUrls[0] || "",
-            photosJson: finalUrls.length > 0 ? JSON.stringify(finalUrls) : undefined,
-          };
-        }
-      }
-
-      await notifyCleaningReportToGroup(reportForNotify, atm);
-      if (antifraud.flags.length > 0) {
-        const accNote = gpsAccuracy ? ` (точность GPS: ${Math.round(Number(gpsAccuracy))} м)` : "";
-        await notifyManagerReport(
-          [
-            "⚠️ <b>Антифрод: подозрительный отчёт об очистке</b>",
-            `Банкомат: ${resolvedAtmCode || "без кода"}${atm ? ` — ${atm.name}` : " (введён вручную, не найден в базе)"}`,
-            `Сотрудник: ${employee.fullName}`,
-            `Причины: ${antifraud.flags.join("; ")}${accNote}`,
-            `Время: ${formatTashkentDateTime(new Date())}`,
-          ].join("\n")
-        );
-      }
-    } catch {
-      /* доставка в Telegram не критична: отчёт уже сохранён */
-    }
-  };
-  void backgroundNotify();
+  // Telegram-доставка не выполняется в HTTP-запросе. Задача уже надёжно
+  // записана в SQLite и будет обработана worker'ом, в том числе после
+  // перезапуска процесса Railway.
 
   return NextResponse.json({
     ok: true,

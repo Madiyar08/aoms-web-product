@@ -19,6 +19,9 @@ import ExcelJS from "exceljs";
 import { createAtm, listAtms, updateAtm } from "./atms";
 import { ensureDefaultStatuses, listStatuses } from "./statuses";
 import { ensureDefaultCategories, listCategories } from "./categories";
+import { resolveRegionName, resolveRegionWithFallback, regionIdForName } from "./geography";
+import { withTransaction } from "./db";
+import { appendImportIssue, type ImportRowIssue } from "./import-diagnostics";
 
 const UZ_LAT_RANGE: [number, number] = [37.0, 45.6];
 const UZ_LON_RANGE: [number, number] = [55.9, 73.2];
@@ -30,6 +33,7 @@ export interface ImportSummary {
   skippedNoCoords: number;
   skippedEmptyRow: number;
   districtsFound: string[];
+  regionsFound: string[];
   withoutId: number;
   // Что распозналось из дополнительных колонок
   categoryColumnFound: boolean;
@@ -39,6 +43,10 @@ export interface ImportSummary {
   statusesAssigned: number;
   unmatchedCategoryNames: string[]; // значения, которые не совпали ни с одной категорией
   unmatchedStatusNames: string[];
+  duplicateCodesInFile: string[];
+  duplicateCodesInDatabase: string[];
+  rowIssues: ImportRowIssue[];
+  rowIssuesTruncated: boolean;
 }
 
 function cellToText(value: unknown): string {
@@ -92,45 +100,82 @@ function detectOptionalColumns(headerRow: ExcelJS.Row): {
   statusCol: number;
   addressVerifiedCol: number;
   coordsVerifiedCol: number;
+  regionCol: number;
+  districtCol: number;
+  addressCol: number;
+  nameCol: number;
+  coordACol: number;
+  coordBCol: number;
+  idCols: number[];
 } {
   let categoryCol = 0;
   let statusCol = 0;
   let addressVerifiedCol = 0;
   let coordsVerifiedCol = 0;
+  let regionCol = 0;
+  let districtCol = 0;
+  let addressCol = 0;
+  let nameCol = 0;
+  let coordACol = 0;
+  let coordBCol = 0;
+  const idCols: number[] = [];
 
   for (let c = 1; c <= 30; c++) {
     const h = norm(cellToText(headerRow.getCell(c).value));
     if (!h) continue;
-    if (!categoryCol && h.includes("категор")) categoryCol = c;
+    if (!addressCol && h.includes("адрес") && !(h.includes("провер") || h.includes("подтверж"))) addressCol = c;
+    if (!nameCol && (h.includes("ориентир") || h.includes("назван") || h.includes("landmark"))) nameCol = c;
+    if ((h.includes("широт") || h.includes("latitude")) && !coordACol) coordACol = c;
+    else if ((h.includes("долгот") || h.includes("longitude")) && !coordBCol) coordBCol = c;
+    if (h.includes("terminalid") || h === "atm id" || h === "id" || h.includes("код банкомата")) idCols.push(c);
+    if (!regionCol && (h === "регион" || h.includes("область") || h.includes("region"))) regionCol = c;
+    else if (!districtCol && (h.includes("район") || h.includes("district"))) districtCol = c;
+    else if (!categoryCol && h.includes("категор")) categoryCol = c;
     else if (!statusCol && h.includes("статус")) statusCol = c;
-    else if (!addressVerifiedCol && h.includes("адрес") && h.includes("провер")) addressVerifiedCol = c;
+    else if (!addressVerifiedCol && h.includes("адрес") && (h.includes("провер") || h.includes("подтверж"))) addressVerifiedCol = c;
     else if (
       !coordsVerifiedCol &&
       (h.includes("координат") || h.includes("коорд")) &&
-      h.includes("провер")
+      (h.includes("провер") || h.includes("подтверж"))
     )
       coordsVerifiedCol = c;
   }
-  return { categoryCol, statusCol, addressVerifiedCol, coordsVerifiedCol };
+  return { categoryCol, statusCol, addressVerifiedCol, coordsVerifiedCol, regionCol, districtCol, addressCol, nameCol, coordACol, coordBCol, idCols };
 }
 
-export async function importAtmsFromExcel(buffer: ArrayBuffer): Promise<ImportSummary> {
+const PREVIEW_ROLLBACK = "AOMS_EXCEL_PREVIEW_ROLLBACK";
+
+export async function importAtmsFromExcel(
+  buffer: ArrayBuffer,
+  options: { previewOnly?: boolean } = {}
+): Promise<ImportSummary> {
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.load(buffer);
   const sheet = workbook.worksheets[0];
 
-  ensureDefaultStatuses();
-  ensureDefaultCategories();
-  const statuses = listStatuses();
-  const categories = listCategories();
-  const newAtmStatus = statuses.find((s) => s.name === "Новый банкомат");
-  const noIdStatus = statuses.find((s) => s.name === "Без ID");
+  let newAtmStatus: ReturnType<typeof listStatuses>[number] | undefined;
+  let noIdStatus: ReturnType<typeof listStatuses>[number] | undefined;
+  let categoryByName = new Map<string, ReturnType<typeof listCategories>[number]>();
+  let statusByName = new Map<string, ReturnType<typeof listStatuses>[number]>();
 
-  // Справочники по нормализованному имени — для сопоставления из Excel
-  const categoryByName = new Map(categories.map((c) => [norm(c.name), c]));
-  const statusByName = new Map(statuses.map((s) => [norm(s.name), s]));
-
-  const existingByCode = new Map(listAtms().filter((a) => a.code).map((a) => [a.code, a]));
+  const normalizeCode = (value: string) => /^\d+$/.test((value || "").trim())
+    ? (value || "").trim().replace(/^0+(?=\d)/, "")
+    : (value || "").trim().toLocaleLowerCase();
+  const existingAtms = listAtms();
+  const existingCodeGroups = new Map<string, typeof existingAtms>();
+  for (const atm of existingAtms) {
+    if (!atm.code) continue;
+    const key = normalizeCode(atm.code);
+    const group = existingCodeGroups.get(key) ?? [];
+    group.push(atm);
+    existingCodeGroups.set(key, group);
+  }
+  const duplicateCodesInDatabase = Array.from(existingCodeGroups.entries())
+    .filter(([, group]) => group.length > 1)
+    .map(([code]) => code);
+  const existingByCode = new Map(Array.from(existingCodeGroups.entries()).filter(([, group]) => group.length === 1).map(([code, group]) => [code, group[0]]));
+  const seenImportCodes = new Set<string>();
+  const duplicateCodesInFile = new Set<string>();
 
   const cols = detectOptionalColumns(sheet.getRow(1));
 
@@ -141,6 +186,7 @@ export async function importAtmsFromExcel(buffer: ArrayBuffer): Promise<ImportSu
     skippedNoCoords: 0,
     skippedEmptyRow: 0,
     districtsFound: [],
+    regionsFound: [],
     withoutId: 0,
     categoryColumnFound: cols.categoryCol > 0,
     statusColumnFound: cols.statusCol > 0,
@@ -149,32 +195,61 @@ export async function importAtmsFromExcel(buffer: ArrayBuffer): Promise<ImportSu
     statusesAssigned: 0,
     unmatchedCategoryNames: [],
     unmatchedStatusNames: [],
+    duplicateCodesInFile: [],
+    duplicateCodesInDatabase,
+    rowIssues: [],
+    rowIssuesTruncated: false,
   };
 
   const unmatchedCats = new Set<string>();
   const unmatchedStatuses = new Set<string>();
   let currentDistrict = "";
+  let currentRegion = "";
   const districtsSeen = new Set<string>();
+  const regionsSeen = new Set<string>();
 
-  sheet.eachRow((row, rowNumber) => {
+  try {
+    withTransaction(() => {
+      // Defaults are created inside the transaction too, so preview mode
+      // leaves absolutely no persistent changes behind.
+      ensureDefaultStatuses();
+      ensureDefaultCategories();
+      const statuses = listStatuses();
+      const categories = listCategories();
+      newAtmStatus = statuses.find((s) => s.name === "Новый банкомат");
+      noIdStatus = statuses.find((s) => s.name === "Без ID");
+      categoryByName = new Map(categories.map((c) => [norm(c.name), c]));
+      statusByName = new Map(statuses.map((s) => [norm(s.name), s]));
+      sheet.eachRow((row, rowNumber) => {
     if (rowNumber === 1) return;
 
-    const address = cellToText(row.getCell(2).value);
-    const landmark = cellToText(row.getCell(3).value);
-    const rawA = cellToFloat(row.getCell(4).value);
-    const rawB = cellToFloat(row.getCell(5).value);
+    const address = cellToText(row.getCell(cols.addressCol || 2).value);
+    const landmark = cellToText(row.getCell(cols.nameCol || 3).value);
+    const rawA = cellToFloat(row.getCell(cols.coordACol || 4).value);
+    const rawB = cellToFloat(row.getCell(cols.coordBCol || 5).value);
+    const headerIds = cols.idCols.map((column) => cellToText(row.getCell(column).value)).filter(Boolean);
     const idFromColF = cellToText(row.getCell(6).value);
     const idFromColG = cellToText(row.getCell(7).value);
-    const code = idFromColG || idFromColF;
+    const code = headerIds.find(Boolean) || idFromColG || idFromColF;
 
     const hasCoords = rawA !== null && rawB !== null;
     const landmarkIsNumeric = landmark !== "" && !Number.isNaN(Number(landmark));
 
     if (!hasCoords) {
-      if (address && !code && (landmarkIsNumeric || !landmark)) {
+      if (address || code || landmark) {
+        appendImportIssue(summary.rowIssues, {
+          rowNumber, code, address, severity: "error",
+          reason: "Не найдена пара координат: проверьте колонки широты и долготы",
+        });
+      }
+      const regionHeading = cols.regionCol ? cellToText(row.getCell(cols.regionCol).value) : "";
+      const districtHeading = cols.districtCol ? cellToText(row.getCell(cols.districtCol).value) : "";
+      if (regionHeading) { currentRegion = resolveRegionName(regionHeading); regionsSeen.add(currentRegion); }
+      if (districtHeading) { currentDistrict = districtHeading; districtsSeen.add(currentDistrict); }
+      if (!regionHeading && !districtHeading && address && !code && (landmarkIsNumeric || !landmark)) {
         currentDistrict = address;
         districtsSeen.add(currentDistrict);
-      } else if (!address && !landmark && !code) {
+      } else if (!regionHeading && !districtHeading && !address && !landmark && !code) {
         summary.skippedEmptyRow += 1;
       } else {
         summary.skippedNoCoords += 1;
@@ -186,10 +261,20 @@ export async function importAtmsFromExcel(buffer: ArrayBuffer): Promise<ImportSu
     const resolved = resolveLatLon(rawA as number, rawB as number);
     if (!resolved) {
       summary.skippedNoCoords += 1;
+      appendImportIssue(summary.rowIssues, {
+        rowNumber, code, address, severity: "error",
+        reason: "Координаты не распознаны или находятся вне диапазона Узбекистана",
+      });
       return;
     }
 
-    if (!code) summary.withoutId += 1;
+    if (!code) {
+      summary.withoutId += 1;
+      appendImportIssue(summary.rowIssues, {
+        rowNumber, code, address, severity: "warning",
+        reason: "Нет ID: запись будет создана без идентификатора и не сможет обновляться по ID",
+      });
+    }
 
     // --- Дополнительные колонки ---
     let categoryId: string | undefined;
@@ -225,13 +310,41 @@ export async function importAtmsFromExcel(buffer: ArrayBuffer): Promise<ImportSu
       ? parseVerified(row.getCell(cols.coordsVerifiedCol).value)
       : undefined;
 
-    const existing = code ? existingByCode.get(code) : undefined;
+    const rowRegionRaw = cols.regionCol ? cellToText(row.getCell(cols.regionCol).value) : "";
+    const rowDistrict = (cols.districtCol ? cellToText(row.getCell(cols.districtCol).value) : "") || currentDistrict;
+    const rowRegion = resolveRegionWithFallback(rowRegionRaw, currentRegion);
+    if (rowRegion) regionsSeen.add(rowRegion);
+    if (rowDistrict) districtsSeen.add(rowDistrict);
+    if (!rowDistrict) {
+      appendImportIssue(summary.rowIssues, {
+        rowNumber, code, address, severity: "warning",
+        reason: "Не указан район: проверьте колонку района или заголовок группы района",
+      });
+    }
+    if (!rowRegion) {
+      appendImportIssue(summary.rowIssues, {
+        rowNumber, code, address, severity: "warning",
+        reason: "Не удалось определить регион из строки или контекста файла",
+      });
+    }
+    const normalizedCode = code ? normalizeCode(code) : "";
+    if (normalizedCode && seenImportCodes.has(normalizedCode)) {
+      duplicateCodesInFile.add(normalizedCode);
+      appendImportIssue(summary.rowIssues, {
+        rowNumber, code, address, severity: "error",
+        reason: `Повторный ID ${code} внутри файла: строка пропущена`,
+      });
+      return;
+    }
+    if (normalizedCode) seenImportCodes.add(normalizedCode);
+    const existing = code ? existingByCode.get(normalizedCode) : undefined;
 
     if (existing) {
       const patch: Record<string, unknown> = {
         address: address || existing.address,
         name: landmark || existing.name,
-        district: currentDistrict || existing.district,
+        district: rowDistrict || existing.district,
+        ...(rowRegion ? { region: rowRegion, regionId: regionIdForName(rowRegion) } : {}),
         latitude: resolved.lat.toString(),
         longitude: resolved.lon.toString(),
         source: "Импорт Excel",
@@ -258,7 +371,9 @@ export async function importAtmsFromExcel(buffer: ArrayBuffer): Promise<ImportSu
         code,
         name: landmark || address || "(без названия)",
         address,
-        district: currentDistrict,
+        district: rowDistrict,
+        region: rowRegion,
+        regionId: regionIdForName(rowRegion),
         latitude: resolved.lat.toString(),
         longitude: resolved.lon.toString(),
         categoryId: categoryId ?? "",
@@ -268,13 +383,26 @@ export async function importAtmsFromExcel(buffer: ArrayBuffer): Promise<ImportSu
         comments: "",
         source: "Импорт Excel",
       });
-      if (code) existingByCode.set(code, created);
+      if (code) existingByCode.set(normalizeCode(code), created);
       summary.created += 1;
     }
-  });
+      });
+      if (!options.previewOnly && (duplicateCodesInDatabase.length || duplicateCodesInFile.size)) {
+        throw new Error("Импорт остановлен: обнаружены повторяющиеся ID. Устраните дубли в базе или Excel и выполните проверку заново.");
+      }
+      if (options.previewOnly) throw new Error(PREVIEW_ROLLBACK);
+    });
+  } catch (error) {
+    if (!(options.previewOnly && error instanceof Error && error.message === PREVIEW_ROLLBACK)) {
+      throw error;
+    }
+  }
 
   summary.districtsFound = Array.from(districtsSeen);
+  summary.regionsFound = Array.from(regionsSeen);
   summary.unmatchedCategoryNames = Array.from(unmatchedCats);
   summary.unmatchedStatusNames = Array.from(unmatchedStatuses);
+  summary.duplicateCodesInFile = Array.from(duplicateCodesInFile);
+  summary.rowIssuesTruncated = summary.rowIssues.length >= 100;
   return summary;
 }

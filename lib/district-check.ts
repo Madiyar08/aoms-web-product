@@ -1,6 +1,7 @@
 import { listAtms, Atm } from "./atms";
 import { haversineMeters } from "./coordinate-analysis";
 import { districtByPolygon, districtByNearestCenter, getDistrictBoundary, listDistrictBoundaries } from "./district-boundaries";
+import { regionIdForName } from "./geography";
 
 /**
  * Район определяется по координатам, а не по тексту из Excel.
@@ -93,14 +94,15 @@ export function findDistrictMismatches(): DistrictMismatch[] {
   // хотя бы центр вручную — иначе банкоматы этого района не проверяем
   // вовсе (безопаснее промолчать, чем ошибочно исключить нормальный
   // банкомат из-за отсутствия данных).
-  const knownDistricts = new Set(listDistrictBoundaries().map((b) => b.district));
+  const knownDistricts = new Set(listDistrictBoundaries().map((b) => `${b.regionId || "legacy"}:${b.district}`));
 
   for (const atm of listAtms()) {
     if (!atm.district) continue;
     const p = parseLatLon(atm);
     if (!p) continue;
 
-    const polygonMatch = districtByPolygon(p.lat, p.lon);
+    const regionId = atm.regionId || regionIdForName(atm.region || "") || undefined;
+    const polygonMatch = districtByPolygon(p.lat, p.lon, regionId);
 
     if (polygonMatch && polygonMatch !== atm.district) {
       out.push({
@@ -118,7 +120,7 @@ export function findDistrictMismatches(): DistrictMismatch[] {
     }
 
     if (!polygonMatch) {
-      const ownBoundary = getDistrictBoundary(atm.district);
+      const ownBoundary = getDistrictBoundary(atm.district, regionId);
       if (ownBoundary && ownBoundary.points.length >= 3) {
         out.push({
           atmId: atm.id,
@@ -146,9 +148,9 @@ export function findDistrictMismatches(): DistrictMismatch[] {
       // собственный записанный район. Обычные банкоматы возле границы
       // при этом не трогаем — лучше пропустить редкую ошибку в данных,
       // чем массово исключать нормальные банкоматы из маршрута.
-      if (knownDistricts.has(atm.district)) {
-        const centerMatch = districtByNearestCenter(p.lat, p.lon);
-        const ownCenter = getDistrictBoundary(atm.district);
+      if (knownDistricts.has(`${regionId || "legacy"}:${atm.district}`)) {
+        const centerMatch = districtByNearestCenter(p.lat, p.lon, regionId);
+        const ownCenter = getDistrictBoundary(atm.district, regionId);
         if (centerMatch && centerMatch.district !== atm.district && ownCenter?.points.length === 1) {
           const distToOwn = Math.round(
             haversineMeters(p.lat, p.lon, ownCenter.points[0].lat, ownCenter.points[0].lon)

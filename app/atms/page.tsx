@@ -72,7 +72,24 @@ export default async function AtmsPage() {
             <Field label="ID банкомата (можно пусто)"><input name="code" className="input" /></Field>
             <Field label="Название"><input name="name" required className="input" /></Field>
             <Field label="Адрес"><input name="address" className="input" /></Field>
+            <Field label="Регион"><input name="region" list="aoms-regions" className="input" /></Field>
             <Field label="Район"><input name="district" className="input" /></Field>
+            <datalist id="aoms-regions">
+              <option value="Республика Каракалпакстан" />
+              <option value="Андижанская область" />
+              <option value="Бухарская область" />
+              <option value="Джизакская область" />
+              <option value="Кашкадарьинская область" />
+              <option value="Навоийская область" />
+              <option value="Наманганская область" />
+              <option value="Самаркандская область" />
+              <option value="Сурхандарьинская область" />
+              <option value="Сырдарьинская область" />
+              <option value="Ташкентская область" />
+              <option value="Ферганская область" />
+              <option value="Хорезмская область" />
+              <option value="Город Ташкент" />
+            </datalist>
             <div className="grid grid-cols-2 gap-3">
               <Field label="Широта"><input name="latitude" className="input" /></Field>
               <Field label="Долгота"><input name="longitude" className="input" /></Field>

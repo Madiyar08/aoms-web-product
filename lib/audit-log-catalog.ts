@@ -1,0 +1,32 @@
+export const AUDIT_ACTIONS = [
+  "cleaning_report.approved",
+  "cleaning_report.rejected",
+  "inspector_report.reviewed",
+  "inspector_report.comment_updated",
+  "atm.created",
+  "atm.updated",
+  "atm.deleted",
+  "atm.bulk_updated",
+  "atm.bulk_deleted",
+  "schedule.created",
+  "schedule.deleted",
+  "employee.created",
+  "employee.updated",
+  "employee.deleted",
+  "machine.created",
+  "machine.updated",
+  "machine.deleted",
+  "recurring_schedule.created",
+  "recurring_schedule.updated",
+  "recurring_schedule.deleted",
+  "admin_user.created",
+  "admin_user.updated",
+  "admin_user.password_reset",
+  "warehouse_item.created",
+  "warehouse_item.archived",
+  "warehouse.receipt",
+  "warehouse.issue",
+] as const;
+export type AuditAction = (typeof AUDIT_ACTIONS)[number];
+export type AuditEntityType = "cleaning_report" | "inspector_report" | "atm" | "schedule" | "employee" | "machine" | "recurring_schedule" | "admin_user" | "warehouse_item" | "warehouse_movement";
+

@@ -21,6 +21,11 @@ export interface CleaningReport extends BaseEntity {
   photosJson?: string; // JSON-массив ссылок на все фото очистки
   gpsLat: string;
   gpsLon: string;
+  gpsAccuracy?: number;
+  gpsCapturedAt?: string;
+  gpsQuality?: "good" | "low_accuracy" | "unavailable";
+  antifraudResult?: "clear" | "review";
+  antifraudReason?: string[];
   clientTime: string; // время съёмки по данным клиента
   // Антифрод-проверки
   inRoute: boolean; // банкомат входил в сегодняшний маршрут экипажа
@@ -38,6 +43,10 @@ export interface CleaningReport extends BaseEntity {
   addressCorrect: boolean;
   coordsCorrect: boolean;
   locationComment: string; // комментарий, если адрес/координаты не совпали
+  approvalStatus?: "pending" | "approved" | "rejected";
+  reviewedAt?: string;
+  reviewedBy?: string;
+  reviewComment?: string;
 }
 
 export function listReportsByAtm(atmId: string): CleaningReport[] {
@@ -63,7 +72,7 @@ export function listReportsByDate(dateIso: string): CleaningReport[] {
 }
 
 export function createCleaningReport(data: Omit<CleaningReport, keyof BaseEntity>): CleaningReport {
-  const row: CleaningReport = { id: newId(), createdAt: nowIso(), updatedAt: nowIso(), ...data };
+  const row: CleaningReport = { id: newId(), createdAt: nowIso(), updatedAt: nowIso(), approvalStatus: "pending", ...data };
   insertRow(TABLE, row);
   return row;
 }

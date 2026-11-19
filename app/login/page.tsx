@@ -3,7 +3,7 @@ export const dynamic = "force-dynamic";
 export default function LoginPage({ searchParams }: { searchParams: { error?: string } }) {
   const errorText =
     searchParams.error === "notset"
-      ? "Пароль не настроен в системе (переменная ADMIN_PASSWORD не задана в Railway) — обратитесь к тому, кто разворачивал систему."
+      ? "Вход не настроен: задайте ADMIN_PASSWORD (минимум 12 символов) в окружении сервера."
       : searchParams.error === "wrong"
       ? "Неверный пароль"
       : null;
@@ -20,9 +20,17 @@ export default function LoginPage({ searchParams }: { searchParams: { error?: st
           Веб-интерфейс для руководителя. Сотрудники работают через Telegram Mini App — им этот вход не нужен.
         </p>
         <input
+          type="text"
+          name="username"
+          placeholder="Логин"
+          autoComplete="username"
+          className="input w-full mb-3"
+        />
+        <input
           type="password"
           name="password"
           placeholder="Пароль"
+          autoComplete="current-password"
           autoFocus
           className="input w-full mb-3"
         />
