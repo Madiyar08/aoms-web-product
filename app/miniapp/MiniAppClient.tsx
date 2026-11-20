@@ -227,13 +227,6 @@ export function MiniAppClient() {
         📋 Мои отчёты и результаты проверки
       </button>
 
-      <button
-        onClick={() => setShowMyReports(true)}
-        className="mt-3 w-full border border-blue-200 bg-blue-50 rounded-xl p-3 text-[13px] font-semibold text-blue-800"
-      >
-        📋 Мои отчёты и результаты проверки
-      </button>
-
       {/* Список маршрута — БЕЗ ID (чтобы не потерять антифрод), но адрес и
           статус видны для ориентира: сколько осталось и где примерно. */}
       {atms.length > 0 && (
