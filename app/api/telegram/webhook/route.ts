@@ -51,6 +51,7 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // 2. Чтение обновления Telegram
   let update: TelegramUpdate;
 
   try {
@@ -62,7 +63,7 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // 2. Обработка геолокации
+  // 3. Обработка геолокации
   const liveLocation =
     update.message?.location ??
     update.edited_message?.location;
@@ -94,7 +95,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: true });
   }
 
-  // 3. Получение текстовой команды
+  // 4. Получение команды
   const text = update.message?.text?.trim();
   const chatId = update.message?.chat?.id;
 
@@ -102,43 +103,64 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: true });
   }
 
-  const text = update.message?.text?.trim();
-  const chatId = update.message?.chat?.id;
+  const chatIdString = String(chatId);
+  const command = normalizeCommand(text);
 
-  // /myid — узнать chat_id
-  if (text === "/myid" && chatId !== undefined) {
-    await sendTelegramMessage(String(chatId), `Chat ID этого чата: <code>${chatId}</code>`);
+  // 5. /myid — показать Telegram Chat ID
+  if (command === "/myid") {
+    const result = await sendTelegramMessage(
+      chatIdString,
+      [
+        "Ваш Telegram Chat ID:",
+        `<code>${chatIdString}</code>`,
+        "",
+        "Отправьте этот номер руководителю для привязки к AOMS."
+      ].join("\n")
+    );
+
+    if (!result.ok) {
+      console.error("[telegram-webhook] /myid:", result.error);
+    }
+
     return NextResponse.json({ ok: true });
   }
 
-  // 5. /help — список команд
+  // 6. /help — список команд
   if (command === "/help") {
-    await sendTelegramMessage(
+    const result = await sendTelegramMessage(
       chatIdString,
       [
         "🤖 <b>ATM Cleaning Service</b>",
         "",
         "/start — начать работу",
-        "/myid — узнать свой Telegram Chat ID",
+        "/myid — узнать Telegram Chat ID",
         "/app — открыть Mini App",
-        "/help — список команд",
+        "/help — помощь",
         "",
         "Для подключения к системе обратитесь к руководителю за персональной ссылкой."
       ].join("\n")
     );
 
+    if (!result.ok) {
+      console.error("[telegram-webhook] /help:", result.error);
+    }
+
     return NextResponse.json({ ok: true });
   }
 
-  // 6. /app — открыть Mini App
+  // 7. /app — открыть Mini App
   if (command === "/app") {
     const employee = findEmployeeByChatId(chatIdString);
 
     if (!employee) {
-      await sendTelegramMessage(
+      const result = await sendTelegramMessage(
         chatIdString,
         "Вы пока не привязаны к AOMS.\n\nОтправьте руководителю свой Telegram Chat ID командой /myid и получите персональную ссылку регистрации."
       );
+
+      if (!result.ok) {
+        console.error("[telegram-webhook] /app:", result.error);
+      }
 
       return NextResponse.json({ ok: true });
     }
@@ -155,10 +177,11 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: true });
   }
 
-  // 7. /start employeeId — персональная регистрация
+  // 8. /start — регистрация или приветствие
   if (command === "/start") {
     const parsed = parseStartPayload(update);
 
+    // Персональная регистрационная ссылка
     if (parsed) {
       const employee = getEmployeeById(parsed.employeeId);
 
@@ -175,16 +198,20 @@ export async function POST(req: NextRequest) {
         telegramChatId: parsed.chatId,
       });
 
-      await sendMiniAppButton(
+      const result = await sendMiniAppButton(
         parsed.chatId,
         `Здравствуйте, ${employee.fullName}! Вы подключены к AOMS. Нажмите кнопку, чтобы открыть приложение и увидеть маршрут.`
       );
 
+      if (!result.ok) {
+        console.error("[telegram-webhook] Registration:", result.error);
+      }
+
       return NextResponse.json({ ok: true });
     }
 
-    // Обычный /start без персонального параметра
-    await sendTelegramMessage(
+    // Обычный /start без параметра
+    const result = await sendTelegramMessage(
       chatIdString,
       [
         "Здравствуйте! 👋",
@@ -203,10 +230,14 @@ export async function POST(req: NextRequest) {
       ].join("\n")
     );
 
+    if (!result.ok) {
+      console.error("[telegram-webhook] /start:", result.error);
+    }
+
     return NextResponse.json({ ok: true });
   }
 
-  // 8. Неизвестная команда
+  // 9. Неизвестная команда
   if (text.startsWith("/")) {
     await sendTelegramMessage(
       chatIdString,
