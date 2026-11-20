@@ -102,20 +102,12 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: true });
   }
 
-  const chatIdString = String(chatId);
-  const command = normalizeCommand(text);
+  const text = update.message?.text?.trim();
+  const chatId = update.message?.chat?.id;
 
-  // 4. /myid — показать Telegram Chat ID
-  if (command === "/myid") {
-    const result = await sendTelegramMessage(
-      chatIdString,
-      `Ваш Telegram Chat ID:\n<code>${chatIdString}</code>\n\nСкопируйте этот номер и отправьте руководителю.`
-    );
-
-    if (!result.ok) {
-      console.error("[telegram-webhook] /myid:", result.error);
-    }
-
+  // /myid — узнать chat_id
+  if (text === "/myid" && chatId !== undefined) {
+    await sendTelegramMessage(String(chatId), `Chat ID этого чата: <code>${chatId}</code>`);
     return NextResponse.json({ ok: true });
   }
 
